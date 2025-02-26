@@ -1,236 +1,168 @@
-from pyspark.sql.functions import udf, explode, col, concat_ws
-from pyspark.sql.types import DoubleType, StringType, ArrayType, StructType, StructField
-import pyspark.sql.functions as F
+from pyspark.sql.functions import pandas_udtf
+import pandas as pd
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType
+from typing import Iterator
 
-# ====================================================================
-# Função: calc_derivative
-# ====================================================================
+# --- Funções de Interpolação Unidimensional e Bidimensional ---
+# (Mantendo as fórmulas conforme as Equações 14 a 20, com Equação 16 corrigida)
+
 def calc_derivative(x, y, idx, side):
     """
-    Calcula a primeira derivada f'(x) em um ponto usando regras de 
-    diferenças finitas "constrained" segundo o lado do ponto (início, 
-    interior ou final).
+    Calcula a primeira derivada f'(x) em um ponto usando regras de
+    diferenças finitas "constrained" conforme o lado do ponto.
 
     Parâmetros:
       - x: lista dos pontos do eixo independente.
       - y: lista dos pontos do eixo dependente.
-      - idx: índice do ponto onde a derivada será calculada.
-      - side: string que indica se é o primeiro ('left'), último ('right')
-              ou um ponto intermediário ('interior').
-
-    Regras aplicadas:
-      1. Para o primeiro ponto (side == 'left'):
-         - Se houver pelo menos 3 pontos, calcula:
-           cond = ((x[2]-x[1])/(y[2]-y[1])) - ((x[1]-x[0])/(y[1]-y[0])).
-         - Se cond < 0, utiliza a diferença simples:
-           f'(x₀) = (y₁ - y₀)/(x₁ - x₀).
-         - Caso contrário, utiliza a fórmula:
-           f'(x₀) = [3(y₁ - y₀)]⁄[2(x₁ - x₀)] – f'(x₂)/2.
-      
-      2. Para o último ponto (side == 'right'):
-         - Utiliza os últimos três pontos e aplica lógica similar ao caso inicial.
-      
-      3. Para pontos internos (side == 'interior'):
-         - Se houver um ponto à frente (idx+2 < len(x)):
-           - Calcula:
-             cond = ((x[idx+2]-x[idx+1])/(y[idx+2]-y[idx+1])) - ((x[idx+1]-x[idx])/(y[idx+1]-y[idx])).
-           - Se cond < 0, utiliza a diferença centrada:
-             f'(xᵢ) = (y[i+1] - y[i-1])/(x[i+1] - x[i-1]).
-           - Caso contrário, aplica:
-             f'(xᵢ) = [3(y[i+1] - y[i])]/[2(x[i+1] - x[i])] – f'(x[i+2])/2.
-         - Se não houver ponto à frente suficiente, usa a diferença simples.
+      - idx: índice onde calcular a derivada.
+      - side: 'left' para o primeiro ponto, 'right' para o último,
+              ou 'interior' para os demais.
     """
     n = len(x)
-    if side == 'left':  # Primeiro ponto (x₀)
+    if side == 'left':
         if n > 2:
-            cond = ((x[2] - x[1]) / (y[2] - y[1])) - ((x[1] - x[0]) / (y[1] - y[0]))
+            cond = ((x[2]-x[1])/(y[2]-y[1])) - ((x[1]-x[0])/(y[1]-y[0]))
             if cond < 0:
-                return (y[1] - y[0]) / (x[1] - x[0])
+                return (y[1]-y[0])/(x[1]-x[0])
             else:
-                fprime_next = (y[2] - y[1]) / (x[2] - x[1])
-                return (3 * (y[1] - y[0]) / (2 * (x[1] - x[0]))) - (fprime_next / 2)
+                fprime_next = (y[2]-y[1])/(x[2]-x[1])
+                return (3*(y[1]-y[0])/(2*(x[1]-x[0]))) - (fprime_next/2)
         else:
-            return (y[1] - y[0]) / (x[1] - x[0])
-    elif side == 'right':  # Último ponto
+            return (y[1]-y[0])/(x[1]-x[0])
+    elif side == 'right':
         if n > 2:
-            cond = ((x[n-1] - x[n-2]) / (y[n-1] - y[n-2])) - ((x[n-2] - x[n-3]) / (y[n-2] - y[n-3]))
+            cond = ((x[n-1]-x[n-2])/(y[n-1]-y[n-2])) - ((x[n-2]-x[n-3])/(y[n-2]-y[n-3]))
             if cond < 0:
-                return (y[n-1] - y[n-2]) / (x[n-1] - x[n-2])
+                return (y[n-1]-y[n-2])/(x[n-1]-x[n-2])
             else:
-                fprime_temp = (y[n-1] - y[n-2]) / (x[n-1] - x[n-2])
-                return (3 * (y[n-1] - y[n-2]) / (2 * (x[n-1] - x[n-2]))) - (fprime_temp / 2)
+                fprime_temp = (y[n-1]-y[n-2])/(x[n-1]-x[n-2])
+                return (3*(y[n-1]-y[n-2])/(2*(x[n-1]-x[n-2]))) - (fprime_temp/2)
         else:
-            return (y[n-1] - y[n-2]) / (x[n-1] - x[n-2])
-    else:  # Ponto interior
-        if idx + 1 < n - 1:
-            cond = ((x[idx+2] - x[idx+1]) / (y[idx+2] - y[idx+1])) - ((x[idx+1] - x[idx]) / (y[idx+1] - y[idx]))
+            return (y[n-1]-y[n-2])/(x[n-1]-x[n-2])
+    else:
+        if idx+1 < n-1:
+            cond = ((x[idx+2]-x[idx+1])/(y[idx+2]-y[idx+1])) - ((x[idx+1]-x[idx])/(y[idx+1]-y[idx]))
             if cond < 0:
-                return (y[idx+1] - y[idx-1]) / (x[idx+1] - x[idx-1])
+                return (y[idx+1]-y[idx-1])/(x[idx+1]-x[idx-1])
             else:
-                fprime_next = (y[idx+2] - y[idx+1]) / (x[idx+2] - x[idx+1])
-                return (3 * (y[idx+1] - y[idx]) / (2 * (x[idx+1] - x[idx]))) - (fprime_next / 2)
+                fprime_next = (y[idx+2]-y[idx+1])/(x[idx+2]-x[idx+1])
+                return (3*(y[idx+1]-y[idx])/(2*(x[idx+1]-x[idx]))) - (fprime_next/2)
         else:
-            return (y[idx] - y[idx-1]) / (x[idx] - x[idx-1])
+            return (y[idx]-y[idx-1])/(x[idx]-x[idx-1])
 
-# ====================================================================
-# Função: cubic_spline_interp
-# ====================================================================
 def cubic_spline_interp(x, y, x_interp):
     """
-    Realiza a interpolação cúbica "constrained" unidimensional usando as 
-    Equações (14) a (20).
-
-    Passos:
-      1. Verificação de Fronteira:
-         Se x_interp for menor ou igual ao primeiro ponto de x, retorna y[0].
-         Se x_interp for maior ou igual ao último ponto, retorna y[-1].
-      2. Localização do Intervalo:
-         Encontra o índice i tal que x[i-1] ≤ x_interp ≤ x[i].
-      3. Cálculo das Derivadas (f'):
-         Utiliza a função calc_derivative para obter:
-           - m₀ = f'(x[i-1]) (usando 'left' se for o primeiro ou 'interior' caso contrário).
-           - m₁ = f'(x[i]) (usando 'right' se for o último ou 'interior').
-      4. Cálculo das Segundas Derivadas (f″):
-         Aplica as Equações:
-           - f″(x[i-1]) = [2(m₁ - m₀)] / (x[i]-x[i-1]) + [6(y[i]-y[i-1])] / (x[i]-x[i-1])²  (Equação 14)
-           - f″(x[i])   = [2(m₁ + m₀)] / (x[i]-x[i-1]) + [6(y[i]-y[i-1])] / (x[i]-x[i-1])²  (Equação 15)
-      5. Cálculo dos Coeficientes da Spline:
-         Calcula os coeficientes:
-           - d = [f″(x[i]) - f″(x[i-1])] / [6(x[i]-x[i-1])]  (Equação 16)
-           - c = [x[i]*f″(x[i-1]) - x[i-1]*f″(x[i])] / [2(x[i]-x[i-1])]  (Equação 17)
-           - b = { (y[i]-y[i-1]) - c*(x[i]² - x[i-1]²) - d*(x[i]³ - x[i-1]³) } / (x[i]-x[i-1])  (Equação 18)
-           - a = y[i-1] - b*x[i-1] - c*x[i-1]² - d*x[i-1]³  (Equação 19)
-      6. Avaliação da Spline:
-         Retorna:
-           y(x_interp) = a + b*x_interp + c*x_interp² + d*x_interp³  (Equação 20)
+    Realiza a interpolação cúbica "constrained" unidimensional usando as
+    Equações (14) a (20). Se houver apenas 2 pontos, utiliza interpolação linear.
     """
     n = len(x)
-    # Se houver apenas 2 pontos, usa interpolação linear (caso especial)
     if n == 2:
         if x_interp <= x[0]:
             return y[0]
         if x_interp >= x[1]:
             return y[1]
-        return y[0] + (y[1] - y[0]) * ((x_interp - x[0]) / (x[1] - x[0]))
+        return y[0] + (y[1]-y[0])*((x_interp-x[0])/(x[1]-x[0]))
     
     if x_interp <= x[0]:
         return y[0]
     if x_interp >= x[-1]:
         return y[-1]
-    # Localiza o intervalo [x[i-1], x[i]]
     i = 1
     while i < n and x_interp > x[i]:
         i += 1
     x0, x1 = x[i-1], x[i]
     y0, y1 = y[i-1], y[i]
-    
-    # Calcula as derivadas para os extremos do intervalo
-    m0 = calc_derivative(x, y, 0 if i-1 == 0 else i-1, 'left' if i-1 == 0 else 'interior')
-    m1 = calc_derivative(x, y, n-1 if i == n-1 else i, 'right' if i == n-1 else 'interior')
-    
-    # Cálculo das segundas derivadas (Equações 14 e 15)
-    f2_x0 = (2 * (m1 - m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0) ** 2)
-    f2_x1 = (2 * (m1 + m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0) ** 2)
-    
-    # Cálculo dos coeficientes (Equações 16 a 19)
-    d = (f2_x1 - f2_x0) / (6 * (x1 - x0))
-    c = (x1 * f2_x0 - x0 * f2_x1) / (2 * (x1 - x0))
-    b = ((y1 - y0) - c * (x1 ** 2 - x0 ** 2) - d * (x1 ** 3 - x0 ** 3)) / (x1 - x0)
-    a = y0 - b * x0 - c * (x0 ** 2) - d * (x0 ** 3)
-    
-    return a + b * x_interp + c * (x_interp ** 2) + d * (x_interp ** 3)
+    m0 = calc_derivative(x, y, 0 if i-1==0 else i-1, 'left' if i-1==0 else 'interior')
+    m1 = calc_derivative(x, y, n-1 if i==n-1 else i, 'right' if i==n-1 else 'interior')
+    f2_x0 = (2*(m1-m0))/(x1-x0) + 6*(y1-y0)/((x1-x0)**2)
+    f2_x1 = (2*(m1+m0))/(x1-x0) + 6*(y1-y0)/((x1-x0)**2)
+    d = (f2_x1 - f2_x0) / (6*(x1-x0))
+    c = (x1*f2_x0 - x0*f2_x1) / (2*(x1-x0))
+    b = ((y1-y0) - c*(x1**2-x0**2) - d*(x1**3-x0**3)) / (x1-x0)
+    a = y0 - b*x0 - c*(x0**2) - d*(x0**3)
+    return a + b*x_interp + c*(x_interp**2) + d*(x_interp**3)
 
-# ====================================================================
-# Função: bidimensional_interp
-# ====================================================================
 def bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp):
     """
-    Realiza a interpolação bidimensional em dois eixos (delta e tempo).
-
-    Passos:
-      1. Interpola no eixo delta:
-         Para cada linha da matriz de volatilidades (cada tempo), utiliza 
-         a função cubic_spline_interp com:
-           - x = deltas,
-           - y = linha de volatilidades para aquele tempo,
-           - x_interp = delta_interp.
-         Obtendo um vetor com um valor por tempo.
-      2. Interpola no eixo tempo:
-         Com o vetor resultante, utiliza novamente cubic_spline_interp com:
-           - x = tempos,
-           - y = vetor de valores interpolados por tempo,
-           - x_interp = tempo_interp.
-         Retorna o valor final interpolado.
+    Realiza a interpolação bidimensional: primeiro interpola no eixo delta,
+    depois no eixo tempo.
     """
     interp_por_tempo = [cubic_spline_interp(deltas, row, delta_interp) for row in vol_matrix]
     return cubic_spline_interp(tempos, interp_por_tempo, tempo_interp)
 
-# ====================================================================
-# UDF: multi_interp_udf
-# ====================================================================
-# Schema do resultado: array de structs com "chave" (string) e "volatilidade_interpolada" (double)
-schema_result = ArrayType(StructType([
-    StructField("chave", StringType(), False),
-    StructField("volatilidade_interpolada", DoubleType(), False)
-]))
-
-@udf(schema_result)
-def multi_interp_udf(volatilidades, tempos, deltas, query_deltas, query_tempos, ativo, data_referencia):
+# --- Função Auxiliar para Processar uma Única Linha de Dados ---
+def compute_multi_interp(volatilidades, tempos, deltas, query_deltas, query_tempos, ativo, data_referencia):
     """
-    UDF para Spark que realiza a interpolação bidimensional da superfície de volatilidade.
-
-    Parâmetros de entrada:
-      - volatilidades: array linear de floats (tamanho N), onde cada índice representa 
-        um ponto (tempo, delta) medido. Pode haver repetições.
-      - tempos: array de floats com os tempos correspondentes (podem haver repetições).
-      - deltas: array de floats com os deltas correspondentes (podem haver repetições).
-      - query_deltas: array de floats com os deltas para os quais deseja calcular a volatilidade interpolada.
-      - query_tempos: array de floats com os tempos para os quais deseja calcular a volatilidade interpolada.
-      - ativo: string com o identificador do ativo.
-      - data_referencia: data (ou string) representando a data de referência.
-
-    Processo:
-      1. Monta um dicionário que mapeia (tempo, delta) para a soma das volatilidades,
-         caso haja mais de uma volatilidade para o mesmo par.
-      2. Deduplica e ordena os eixos de tempo e delta.
-      3. Reconstrói a matriz 2D de volatilidades a partir do dicionário.
-      4. Para cada combinação (query_delta, query_tempo) desejada (grid de consulta),
-         calcula a volatilidade interpolada utilizando a função bidimensional_interp.
-      5. Para cada ponto de consulta, cria uma chave no formato "ativo_{delta_formatado}_{tempo_formatado}",
-         onde:
-           - O delta é multiplicado por 10 e o ponto decimal é removido.
-           - O tempo (vencimento) é convertido para inteiro e preenchido com zeros à esquerda até 5 dígitos.
-      6. Retorna um array de structs com a chave e a volatilidade interpolada.
+    Processa uma linha de entrada (com arrays de dados medidos e de consulta)
+    e retorna uma lista de dicionários, cada um representando uma linha de saída com:
+      - Data_referencia
+      - chave (formada por ativo, delta e tempo de consulta)
+      - Volatilidade_Interpolada
+    Se houver mais de uma medição para o mesmo par (tempo, delta), soma os valores.
     """
-    # Monta o dicionário: mapeia (tempo, delta) para a soma das volatilidades
     data_dict = {}
     for i in range(len(volatilidades)):
         key = (tempos[i], deltas[i])
         data_dict[key] = data_dict.get(key, 0.0) + volatilidades[i]
     
-    # Deduplica e ordena os eixos usando list comprehensions
     unique_tempos = sorted({t for t in tempos})
     unique_deltas = sorted({d for d in deltas})
-    
-    # Reconstrói a matriz 2D de volatilidades: cada linha para um tempo único,
-    # com os valores correspondentes a cada delta único.
     vol_matrix = [[data_dict.get((t, d), 0.0) for d in unique_deltas] for t in unique_tempos]
     
-    # Calcula os resultados para cada combinação de query_delta e query_tempo
-    results = [
-        {
-            "chave": f"{ativo}_{str(int(qd * 10))}_{str(int(qt)).zfill(5)}",
-            "volatilidade_interpolada": bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, qd, qt)
-        }
-        for qt in query_tempos
-        for qd in query_deltas
-    ]
-    return results
+    result_list = []
+    for qt in query_tempos:
+        for qd in query_deltas:
+            interp_val = bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, qd, qt)
+            # Formata a chave: delta formatado com zfill(3) (delta*10) e tempo com zfill(5)
+            delta_str = str(int(round(qd * 10))).zfill(3)
+            tempo_str = str(int(qt)).zfill(5)
+            chave = f"{ativo}_{delta_str}_{tempo_str}"
+            result_list.append({
+                "Data_referencia": data_referencia,
+                "chave": chave,
+                "Volatilidade_Interpolada": interp_val
+            })
+    return result_list
 
-# ====================================================================
-# Exemplo de Aplicação no DataFrame de Consulta
-# ====================================================================
-# Suponha que seu DataFrame de consulta contenha as seguintes colunas:
+# --- UDTF com pandas_udtf ---
+# Essa UDTF recebe, para cada registro, os arrays de dados e de consulta e já retorna um DataFrame com as linhas formatadas.
+output_schema = StructType([
+    StructField("Data_referencia", StringType(), False),
+    StructField("chave", StringType(), False),
+    StructField("Volatilidade_Interpolada", DoubleType(), False)
+])
+
+@pandas_udtf(output_schema, functionType="iterator")
+def multi_interp_udtf(volatilidades: pd.Series,
+                      tempos: pd.Series,
+                      deltas: pd.Series,
+                      query_deltas: pd.Series,
+                      query_tempos: pd.Series,
+                      ativo: pd.Series,
+                      data_referencia: pd.Series) -> Iterator[pd.DataFrame]:
+    """
+    UDTF que realiza a interpolação bidimensional da superfície de volatilidade.
+    Para cada registro de entrada (com arrays de volatilidades, tempos, deltas,
+    query_deltas e query_tempos, além do ativo e data_referencia), retorna um DataFrame
+    com as colunas:
+      - Data_referencia
+      - chave (formato "ativo_{delta_formatado}_{tempo_formatado}")
+      - Volatilidade_Interpolada
+    """
+    for i in range(len(volatilidades)):
+        # Cada entrada é uma lista; assumimos que os valores já estão formatados como Python lists
+        vol = volatilidades.iloc[i]
+        t = tempos.iloc[i]
+        d = deltas.iloc[i]
+        qd = query_deltas.iloc[i]
+        qt = query_tempos.iloc[i]
+        a = ativo.iloc[i]
+        dr = data_referencia.iloc[i]
+        result_list = compute_multi_interp(vol, t, d, qd, qt, a, dr)
+        yield pd.DataFrame(result_list)
+
+# --- Exemplo de Aplicação no DataFrame de Consulta ---
+# Suponha que o DataFrame de consulta contenha as colunas:
 #   - Ativo
 #   - Data_referencia
 #   - volatilidades: array de floats (dados medidos)
@@ -242,25 +174,18 @@ data = [
     (
         "ABC",                     # Ativo
         "2025-03-31",              # Data_referencia
-        [0.3, 0.5, 0.6, 0.1],        # volatilidades (ex.: índice 0 -> (tempo=1.0, delta=0.05), índice 1 -> (tempo=2.0, delta=0.05), etc.)
+        [0.3, 0.5, 0.6, 0.1],        # volatilidades: ex. índice 0 -> (tempo=1.0, delta=0.05), 1 -> (tempo=2.0, delta=0.05), etc.
         [1.0, 2.0, 1.0, 2.0],        # tempos
         [0.05, 0.05, 0.1, 0.1],       # deltas
-        [0.075, 0.085],             # query_deltas
-        [1.5, 2.5]                  # query_tempos
+        [0.075, 0.085],             # query_deltas: somente os valores a consultar
+        [1.5, 2.5]                  # query_tempos: somente os tempos a consultar
     )
 ]
 columns = ["Ativo", "Data_referencia", "volatilidades", "tempos", "deltas", "query_deltas", "query_tempos"]
 df = spark.createDataFrame(data, schema=columns)
 
-# Aplica a UDF para criar a coluna "results" com os resultados de interpolação
-df = df.withColumn("results", multi_interp_udf("volatilidades", "tempos", "deltas", "query_deltas", "query_tempos", "Ativo", "Data_referencia"))
-
-# Explode a coluna "results" para obter uma linha por cada combinação (query_delta, query_tempo)
-final_df = df.select("Data_referencia", explode("results").alias("result")) \
-              .select(
-                  "Data_referencia",
-                  col("result.chave").alias("chave"),
-                  col("result.volatilidade_interpolada").alias("Volatilidade_Interpolada")
-              )
+# Aplica a UDTF; ela já retorna um DataFrame com as linhas formatadas conforme desejado.
+final_df = df.selectExpr("multi_interp_udtf(volatilidades, tempos, deltas, query_deltas, query_tempos, Ativo, Data_referencia) as results") \
+              .select("results.*")
 
 final_df.show(truncate=False)
