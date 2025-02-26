@@ -74,3 +74,34 @@ def interpolar_2d(deltas: pd.Series, vencimentos: pd.Series, vols: pd.Series,
     )
 
     return pd.Series(vol_interpolado)
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lit
+import pandas as pd
+
+# Criando a Spark Session
+spark = SparkSession.builder.appName("Interpolacao2D_Aplicacao").getOrCreate()
+
+# Exemplo de Dados: Delta, Tempo (Dias) e Volatilidade Implícita
+data = [
+    (0.05, 1, 0.25), (0.05, 7, 0.28), (0.05, 14, 0.30),
+    (0.05, 30, 0.32), (0.05, 60, 0.35), (0.10, 1, 0.20),
+    (0.10, 7, 0.22), (0.10, 14, 0.24), (0.10, 30, 0.26),
+    (0.10, 60, 0.29)
+]
+df = spark.createDataFrame(data, ["Delta", "Vencimento", "Vol"])
+
+# Especificando o Delta e Tempo alvo para interpolação
+delta_target = 0.07  # Interpolação para Delta = 7%
+t_target = 10        # Interpolação para Vencimento = 10 dias
+
+# Aplicando a função de interpolação diretamente no DataFrame Spark
+df_resultado = df.select(
+    interpolar_2d(
+        col("Delta"), col("Vencimento"), col("Vol"),
+        lit(delta_target), lit(t_target)
+    ).alias("Volatilidade_Interpolada")
+)
+
+# Exibir o resultado final
+df_resultado.show()
