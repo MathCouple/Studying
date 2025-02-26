@@ -3,10 +3,9 @@ from pyspark.sql.functions import pandas_udf, col
 from pyspark.sql.types import DoubleType
 import pandas as pd
 import numpy as np
-from scipy.interpolate import CubicSpline
 
 # Criando a Spark Session
-spark = SparkSession.builder.appName("InterpolacaoCubicaRestrita").getOrCreate()
+spark = SparkSession.builder.appName("InterpolacaoCubicaManual").getOrCreate()
 
 # Exemplo de Dados: Delta, Tempo (Dias) e Volatilidade Implícita
 data = [
@@ -17,58 +16,83 @@ data = [
 ]
 df = spark.createDataFrame(data, ["Delta", "Vencimento", "Vol"])
 
-# Definição da UDF para interpolação cúbica restrita no tempo
+# UDF para interpolação cúbica no tempo
 @pandas_udf(DoubleType())
 def interpolar_vol(vencimentos: pd.Series, vols: pd.Series, x_interp: float) -> pd.Series:
     """
-    Aplica a interpolação cúbica restrita nos pontos (Vencimento, Volatilidade Implícita)
-    para estimar a volatilidade no ponto x_interp.
+    Implementação manual da interpolação cúbica restrita (Constrained Cubic Spline) no tempo.
     """
 
-    # Equação (14) e (15): Cálculo da segunda derivada da spline cúbica restrita
+    # Ordenação para garantir interpolação correta
     sorted_indices = np.argsort(vencimentos)
-    x = vencimentos.iloc[sorted_indices].values  # Ordenamos os vencimentos
-    y = vols.iloc[sorted_indices].values  # Correspondentes valores de volatilidade
+    x = vencimentos.iloc[sorted_indices].values  # x_i (vencimentos ordenados)
+    y = vols.iloc[sorted_indices].values  # y_i (volatilidades correspondentes)
 
-    # Verificação de extrapolação: Se x_interp estiver fora dos limites conhecidos
+    # Verificação de extrapolação
     if x_interp < x[0] or x_interp > x[-1]:
         return pd.Series(y[0] if x_interp < x[0] else y[-1])
 
-    # Criando a spline cúbica restrita (monotônica), garantindo suavidade
-    spline = CubicSpline(x, y, bc_type="natural", extrapolate=False)
+    # Encontrar o intervalo correto: x_i <= x_interp < x_{i+1}
+    i = next(i for i in range(1, len(x)) if x[i-1] <= x_interp < x[i])
 
-    # Equação (20): Aplicação da interpolação cúbica
-    return pd.Series(spline(x_interp))
+    # Cálculo da primeira derivada (equação 5)
+    f_prime_x1 = (y[1] - y[0]) / (x[1] - x[0])
+    f_prime_xn_1 = (y[-1] - y[-2]) / (x[-1] - x[-2])
 
-# Interpolação no eixo do tempo para cada Delta fixo
+    # Cálculo das segundas derivadas (equações 14 e 15)
+    f2_x_i_1 = (2 * (f_prime_x1 - f_prime_xn_1) / (x[i] - x[i-1])) + (6 * (y[i] - y[i-1]) / (x[i] - x[i-1])**2)
+    f2_x_i = (2 * (f_prime_x1 + f_prime_xn_1) / (x[i] - x[i-1])) + (6 * (y[i] - y[i-1]) / (x[i] - x[i-1])**2)
+
+    # Coeficientes cúbicos (equações 16 a 19)
+    d_i = (f2_x_i - f2_x_i_1) / (6 * (x[i] - x[i-1]))
+    c_i = (x[i] * f2_x_i_1 - x[i-1] * f2_x_i) / (2 * (x[i] - x[i-1]))
+    b_i = ((y[i] - y[i-1]) - c_i * (x[i]**2 - x[i-1]**2) - d_i * (x[i]**3 - x[i-1]**3)) / (x[i] - x[i-1])
+    a_i = y[i-1] - b_i * x[i-1] - c_i * x[i-1]**2 - d_i * x[i-1]**3
+
+    # Aplicação da interpolação cúbica (equação 20)
+    y_interp = a_i + b_i * x_interp + c_i * x_interp**2 + d_i * x_interp**3
+
+    return pd.Series(y_interp)
+
+# Aplicando a interpolação cúbica no tempo para cada Delta fixo
 x_interp = 75  # Exemplo: Queremos volatilidade para 75 dias
 df_temporal = df.groupBy("Delta").agg(interpolar_vol(col("Vencimento"), col("Vol"), x_interp).alias("Vol_Interpolado"))
 
-# Agora interpolamos no eixo do Delta para obter um valor contínuo
-
+# UDF para interpolação cúbica no Delta
 @pandas_udf(DoubleType())
 def interpolar_delta(deltas: pd.Series, vols: pd.Series, delta_interp: float) -> pd.Series:
     """
-    Aplica a interpolação cúbica restrita nos pontos (Delta, Volatilidade Interpolada)
-    para estimar a volatilidade no ponto delta_interp.
+    Implementação manual da interpolação cúbica restrita no eixo do Delta.
     """
 
-    # Equação (14) e (15): Cálculo da segunda derivada para Delta
+    # Ordenação para garantir interpolação correta
     sorted_indices = np.argsort(deltas)
-    x = deltas.iloc[sorted_indices].values  # Ordenamos os deltas
-    y = vols.iloc[sorted_indices].values  # Correspondentes volatilidades interpoladas no tempo
+    x = deltas.iloc[sorted_indices].values  # x_i (deltas ordenados)
+    y = vols.iloc[sorted_indices].values  # y_i (volatilidades interpoladas no tempo)
 
     # Verificação de extrapolação
     if delta_interp < x[0] or delta_interp > x[-1]:
         return pd.Series(y[0] if delta_interp < x[0] else y[-1])
 
-    # Criando a spline cúbica restrita para Delta
-    spline = CubicSpline(x, y, bc_type="natural", extrapolate=False)
+    # Encontrar o intervalo correto: x_i <= delta_interp < x_{i+1}
+    i = next(i for i in range(1, len(x)) if x[i-1] <= delta_interp < x[i])
 
-    # Equação (20): Aplicação da interpolação cúbica
-    return pd.Series(spline(delta_interp))
+    # Cálculo das segundas derivadas (equações 14 e 15)
+    f2_x_i_1 = (2 * (y[i] - y[i-1]) / (x[i] - x[i-1])**2)
+    f2_x_i = (2 * (y[i] - y[i-1]) / (x[i] - x[i-1])**2)
 
-# Supondo que queremos interpolar também no eixo Delta
+    # Coeficientes cúbicos (equações 16 a 19)
+    d_i = (f2_x_i - f2_x_i_1) / (6 * (x[i] - x[i-1]))
+    c_i = (x[i] * f2_x_i_1 - x[i-1] * f2_x_i) / (2 * (x[i] - x[i-1]))
+    b_i = ((y[i] - y[i-1]) - c_i * (x[i]**2 - x[i-1]**2) - d_i * (x[i]**3 - x[i-1]**3)) / (x[i] - x[i-1])
+    a_i = y[i-1] - b_i * x[i-1] - c_i * x[i-1]**2 - d_i * x[i-1]**3
+
+    # Aplicação da interpolação cúbica (equação 20)
+    y_interp = a_i + b_i * delta_interp + c_i * delta_interp**2 + d_i * delta_interp**3
+
+    return pd.Series(y_interp)
+
+# Aplicando a interpolação cúbica no eixo do Delta
 delta_interp = 0.15
 df_final = df_temporal.agg(interpolar_delta(col("Delta"), col("Vol_Interpolado"), delta_interp).alias("Vol_Final"))
 
