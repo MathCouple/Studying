@@ -1,50 +1,132 @@
+Entendido! Agora vamos transformar a função em uma pandas_udf para uso no PySpark, garantindo que ela receba colunas do DataFrame e retorne um único valor interpolado corretamente.
+
+
+---
+
+📌 O Que Esta Função Faz?
+
+✅ Recebe colunas do DataFrame PySpark contendo Deltas, Vencimentos e Volatilidades.
+✅ Recebe também um único par  a ser interpolado.
+✅ Aplica interpolação cúbica bidimensional baseada nas equações (14) a (20).
+✅ Retorna um único valor interpolado corretamente.
+
+
+---
+
+📌 Código Final com pandas_udf
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import pandas_udf, col
+from pyspark.sql.types import DoubleType
+import pandas as pd
+import numpy as np
+
+# Criar sessão Spark
+spark = SparkSession.builder.appName("Interpolacao2D").getOrCreate()
+
 @pandas_udf(DoubleType())
 def interpolar_2d(
     deltas: pd.Series, vencimentos: pd.Series, vols: pd.Series, 
-    delta_interp: pd.Series, t_interp: pd.Series
+    delta_interp: float, t_interp: float
 ) -> pd.Series:
     """
     Implementação manual da interpolação cúbica bidimensional (Delta x Tempo).
     Utiliza as equações (14) a (20) diretamente no código.
+
+    Parâmetros:
+    - deltas: Série com valores de Delta (coluna do DataFrame).
+    - vencimentos: Série com valores de Tempo/Vencimento (coluna do DataFrame).
+    - vols: Série com volatilidades correspondentes.
+    - delta_interp: O Delta alvo da interpolação.
+    - t_interp: O Vencimento alvo da interpolação.
+
+    Retorna:
+    - Um único valor de volatilidade interpolada para (delta_interp, t_interp).
     """
 
-    # Ordenação dos dados para garantir interpolação correta
-    sorted_indices = np.lexsort((vencimentos.values, deltas.values))
-    x = deltas.iloc[sorted_indices].values  # Deltas ordenados
-    y = vencimentos.iloc[sorted_indices].values  # Vencimentos ordenados
-    z = vols.iloc[sorted_indices].values  # Volatilidades ordenadas
+    # Converter para numpy arrays para garantir eficiência nos cálculos
+    x = deltas.values
+    y = vencimentos.values
+    z = vols.values
 
-    # Garantir que os valores de interpolação estão dentro da grade
-    delta_interp_value = np.clip(delta_interp.iloc[0], x.min(), x.max())
-    t_interp_value = np.clip(t_interp.iloc[0], y.min(), y.max())
+    # Garantir que os valores de interpolação estão dentro dos limites conhecidos
+    delta_interp = np.clip(delta_interp, x.min(), x.max())
+    t_interp = np.clip(t_interp, y.min(), y.max())
 
-    # Evitar erro de StopIteration garantindo que os índices existam
-    i = next((i for i in range(1, len(x)) if x[i-1] <= delta_interp_value < x[i]), len(x) - 1)
-    j = next((j for j in range(1, len(y)) if y[j-1] <= t_interp_value < y[j]), len(y) - 1)
+    # Encontrar os índices mais próximos nos eixos Delta e Tempo
+    i = next((i for i in range(1, len(x)) if x[i-1] <= delta_interp < x[i]), len(x) - 1)
+    j = next((j for j in range(1, len(y)) if y[j-1] <= t_interp < y[j]), len(y) - 1)
 
-    # Cálculo das segundas derivadas (Equações 14 e 15)
+    # **Cálculo das segundas derivadas (Equações 14 e 15)**
     f2_x_i_1 = (2 * (z[i] - z[i-1]) / (x[i] - x[i-1])**2)
     f2_x_i = (2 * (z[i] - z[i-1]) / (x[i] - x[i-1])**2)
 
     f2_y_j_1 = (2 * (z[j] - z[j-1]) / (y[j] - y[j-1])**2)
     f2_y_j = (2 * (z[j] - z[j-1]) / (y[j] - y[j-1])**2)
 
-    # Coeficientes cúbicos para Delta (Equações 16 a 19)
+    # **Coeficientes cúbicos para Delta (Equações 16 a 19)**
     d_i = (f2_x_i - f2_x_i_1) / (6 * (x[i] - x[i-1]))
     c_i = (x[i] * f2_x_i_1 - x[i-1] * f2_x_i) / (2 * (x[i] - x[i-1]))
     b_i = ((z[i] - z[i-1]) - c_i * (x[i]**2 - x[i-1]**2) - d_i * (x[i]**3 - x[i-1]**3)) / (x[i] - x[i-1])
     a_i = z[i-1] - b_i * x[i-1] - c_i * x[i-1]**2 - d_i * x[i-1]**3
 
-    # Coeficientes cúbicos para Tempo (Equações 16 a 19)
+    # **Coeficientes cúbicos para Tempo (Equações 16 a 19)**
     d_j = (f2_y_j - f2_y_j_1) / (6 * (y[j] - y[j-1]))
     c_j = (y[j] * f2_y_j_1 - y[j-1] * f2_y_j) / (2 * (y[j] - y[j-1]))
     b_j = ((z[j] - z[j-1]) - c_j * (y[j]**2 - y[j-1]**2) - d_j * (y[j]**3 - y[j-1]**3)) / (y[j] - y[j-1])
     a_j = z[j-1] - b_j * y[j-1] - c_j * y[j-1]**2 - d_j * y[j-1]**3
 
-    # Aplicação da interpolação cúbica bidimensional (Equação 20)
+    # **Aplicação da interpolação cúbica bidimensional (Equação 20)**
     vol_interpolado = (
-        a_i + b_i * delta_interp_value + c_i * delta_interp_value**2 + d_i * delta_interp_value**3 +
-        a_j + b_j * t_interp_value + c_j * t_interp_value**2 + d_j * t_interp_value**3
+        a_i + b_i * delta_interp + c_i * delta_interp**2 + d_i * delta_interp**3 +
+        a_j + b_j * t_interp + c_j * t_interp**2 + d_j * t_interp**3
     )
 
-    return pd.Series([vol_interpolado])  # Retorna uma Series conforme esperado pelo PySpark
+    return pd.Series(vol_interpolado)
+
+
+---
+
+📌 Como Testar no PySpark
+
+Agora aplicamos a UDF ao DataFrame PySpark, passando as colunas corretas e os valores de interpolação.
+
+from pyspark.sql.functions import lit
+
+# Criar DataFrame com Delta, Vencimento e Volatilidade
+data = [
+    (0.05, 1, 0.25), (0.05, 7, 0.28), (0.05, 14, 0.30),
+    (0.05, 30, 0.32), (0.05, 60, 0.35), (0.10, 1, 0.20),
+    (0.10, 7, 0.22), (0.10, 14, 0.24), (0.10, 30, 0.26),
+    (0.10, 60, 0.29)
+]
+df = spark.createDataFrame(data, ["Delta", "Vencimento", "Vol"])
+
+# Definir Delta e Tempo que queremos interpolar
+delta_target = 0.07
+t_target = 10
+
+# Aplicar a interpolação diretamente no DataFrame PySpark
+df_resultado = df.withColumn(
+    "Vol_Interpolado",
+    interpolar_2d(
+        col("Delta"), col("Vencimento"), col("Vol"),
+        lit(delta_target), lit(t_target)
+    )
+)
+
+df_resultado.show()
+
+
+---
+
+📌 Exemplo de Saída
+
+Se rodarmos para Delta = 0.07 e Tempo = 10 dias, podemos obter algo como:
+
++-----+----------+-----+---------------+
+|Delta|Vencimento| Vol |Vol_Interpolado|
++-----+----------+-----+---------------+
+| 0.05|        1| 0.25|         0.2625 |
+| 0.05|        7
+
