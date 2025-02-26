@@ -1,4 +1,4 @@
-from pyspark.sql.functions import udf, explode, col
+from pyspark.sql.functions import udf, explode, col, concat_ws
 from pyspark.sql.types import DoubleType, StringType, ArrayType, StructType, StructField
 import pyspark.sql.functions as F
 
@@ -105,6 +105,14 @@ def cubic_spline_interp(x, y, x_interp):
            y(x_interp) = a + b*x_interp + c*x_interp² + d*x_interp³  (Equação 20)
     """
     n = len(x)
+    # Se houver apenas 2 pontos, usa interpolação linear (caso especial)
+    if n == 2:
+        if x_interp <= x[0]:
+            return y[0]
+        if x_interp >= x[1]:
+            return y[1]
+        return y[0] + (y[1] - y[0]) * ((x_interp - x[0]) / (x[1] - x[0]))
+    
     if x_interp <= x[0]:
         return y[0]
     if x_interp >= x[-1]:
@@ -121,16 +129,16 @@ def cubic_spline_interp(x, y, x_interp):
     m1 = calc_derivative(x, y, n-1 if i == n-1 else i, 'right' if i == n-1 else 'interior')
     
     # Cálculo das segundas derivadas (Equações 14 e 15)
-    f2_x0 = (2 * (m1 - m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0)**2)
-    f2_x1 = (2 * (m1 + m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0)**2)
+    f2_x0 = (2 * (m1 - m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0) ** 2)
+    f2_x1 = (2 * (m1 + m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0) ** 2)
     
     # Cálculo dos coeficientes (Equações 16 a 19)
     d = (f2_x1 - f2_x0) / (6 * (x1 - x0))
     c = (x1 * f2_x0 - x0 * f2_x1) / (2 * (x1 - x0))
-    b = ((y1 - y0) - c * (x1**2 - x0**2) - d * (x1**3 - x0**3)) / (x1 - x0)
-    a = y0 - b * x0 - c * (x0**2) - d * (x0**3)
+    b = ((y1 - y0) - c * (x1 ** 2 - x0 ** 2) - d * (x1 ** 3 - x0 ** 3)) / (x1 - x0)
+    a = y0 - b * x0 - c * (x0 ** 2) - d * (x0 ** 3)
     
-    return a + b * x_interp + c * (x_interp**2) + d * (x_interp**3)
+    return a + b * x_interp + c * (x_interp ** 2) + d * (x_interp ** 3)
 
 # ====================================================================
 # Função: bidimensional_interp
@@ -190,7 +198,7 @@ def multi_interp_udf(volatilidades, tempos, deltas, query_deltas, query_tempos, 
          calcula a volatilidade interpolada utilizando a função bidimensional_interp.
       5. Para cada ponto de consulta, cria uma chave no formato "ativo_{delta_formatado}_{tempo_formatado}",
          onde:
-           - O delta é multiplicado por 10 e o ponto decimal removido.
+           - O delta é multiplicado por 10 e o ponto decimal é removido.
            - O tempo (vencimento) é convertido para inteiro e preenchido com zeros à esquerda até 5 dígitos.
       6. Retorna um array de structs com a chave e a volatilidade interpolada.
     """
@@ -208,10 +216,10 @@ def multi_interp_udf(volatilidades, tempos, deltas, query_deltas, query_tempos, 
     # com os valores correspondentes a cada delta único.
     vol_matrix = [[data_dict.get((t, d), 0.0) for d in unique_deltas] for t in unique_tempos]
     
-    # Calcula os resultados para cada combinação de query_delta e query_tempo utilizando list comprehension
+    # Calcula os resultados para cada combinação de query_delta e query_tempo
     results = [
         {
-            "chave": f"{ativo}_{str(qd * 10).replace('.', '')}_{str(int(qt)).zfill(5)}",
+            "chave": f"{ativo}_{str(int(qd * 10))}_{str(int(qt)).zfill(5)}",
             "volatilidade_interpolada": bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, qd, qt)
         }
         for qt in query_tempos
