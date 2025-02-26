@@ -24,25 +24,20 @@ def calc_derivative(x, y, idx, side):
          - Se cond < 0, utiliza a diferença simples:
            f'(x₀) = (y₁ - y₀)/(x₁ - x₀).
          - Caso contrário, utiliza a fórmula:
-           f'(x₀) = [3(y₁ - y₀)]⁄[2(x₁ - x₀)] – f'(x₂)/2,
-           onde f'(x₂) é a derivada simples entre o segundo e terceiro pontos.
+           f'(x₀) = [3(y₁ - y₀)]⁄[2(x₁ - x₀)] – f'(x₂)/2.
       
       2. Para o último ponto (side == 'right'):
-         - De forma análoga, se houver pelo menos 3 pontos, calcula:
-           cond = ((xₙ - xₙ₋₁)/(yₙ - yₙ₋₁)) - ((xₙ₋₁ - xₙ₋₂)/(yₙ₋₁ - yₙ₋₂)).
-         - Se cond < 0, usa a diferença simples:
-           f'(xₙ) = (yₙ - yₙ₋₁)/(xₙ - xₙ₋₁).
-         - Caso contrário, aplica a fórmula análoga ao caso inicial.
+         - Utiliza os últimos três pontos e aplica lógica similar ao caso inicial.
       
       3. Para pontos internos (side == 'interior'):
-         - Se existir um ponto “à frente” (ou seja, se idx+2 < len(x)):
+         - Se houver um ponto à frente (idx+2 < len(x)):
            - Calcula:
              cond = ((x[idx+2]-x[idx+1])/(y[idx+2]-y[idx+1])) - ((x[idx+1]-x[idx])/(y[idx+1]-y[idx])).
            - Se cond < 0, utiliza a diferença centrada:
              f'(xᵢ) = (y[i+1] - y[i-1])/(x[i+1] - x[i-1]).
-           - Caso contrário, utiliza:
-             f'(xᵢ) = [3(y[i+1] - y[i])]/[2(x[i+1]-x[i])] – f'(x[i+2])/2.
-         - Se não houver pontos suficientes à frente, recorre à diferença simples.
+           - Caso contrário, aplica:
+             f'(xᵢ) = [3(y[i+1] - y[i])]/[2(x[i+1] - x[i])] – f'(x[i+2])/2.
+         - Se não houver ponto à frente suficiente, usa a diferença simples.
     """
     n = len(x)
     if side == 'left':  # Primeiro ponto (x₀)
@@ -94,23 +89,23 @@ def cubic_spline_interp(x, y, x_interp):
 
       3. **Cálculo das Derivadas (f'):**  
          Utiliza a função calc_derivative para obter:
-         - m₀ = f'(x[i-1]) (usando a regra 'left' se for o primeiro ou 'interior').
-         - m₁ = f'(x[i]) (usando a regra 'right' se for o último ou 'interior').
-
+           - m₀ = f'(x[i-1]) (usando 'left' se for o primeiro ou 'interior' caso contrário).
+           - m₁ = f'(x[i]) (usando 'right' se for o último ou 'interior').
+      
       4. **Cálculo das Segundas Derivadas (f″):**  
          Aplica as Equações:
            - f″(x[i-1]) = [2(m₁ - m₀)]⁄(x[i]-x[i-1]) + [6(y[i]-y[i-1])]/(x[i]-x[i-1])²  (Equação 14)
            - f″(x[i])   = [2(m₁ + m₀)]⁄(x[i]-x[i-1]) + [6(y[i]-y[i-1])]/(x[i]-x[i-1])²  (Equação 15)
 
       5. **Cálculo dos Coeficientes da Spline:**  
-         Calcula os coeficientes da interpolação cúbica:
-           - d = [f″(x[i]) - f″(x[i-1])]⁄[6(x[i]-x[i-1])]  (Equação 16)
-           - c = [x[i]·f″(x[i-1]) - x[i-1]·f″(x[i])]⁄[2(x[i]-x[i-1])]  (Equação 17)
-           - b = { (y[i]-y[i-1]) - c·(x[i]² - x[i-1]²) - d·(x[i]³ - x[i-1]³) }⁄(x[i]-x[i-1])  (Equação 18)
+         Calcula os coeficientes:
+           - d = [f″(x[i]) - f″(x[i-1])]/[6(x[i]-x[i-1])]  (Equação 16)
+           - c = [x[i]·f″(x[i-1]) - x[i-1]·f″(x[i])]/[2(x[i]-x[i-1])]  (Equação 17)
+           - b = { (y[i]-y[i-1]) - c·(x[i]² - x[i-1]²) - d·(x[i]³ - x[i-1]³) }/(x[i]-x[i-1])  (Equação 18)
            - a = y[i-1] - b·x[i-1] - c·x[i-1]² - d·x[i-1]³  (Equação 19)
-
+      
       6. **Avaliação da Spline:**  
-         Calcula o valor interpolado:
+         Retorna:
            y(x_interp) = a + b·x_interp + c·x_interp² + d·x_interp³  (Equação 20)
     """
     n = len(x)
@@ -125,21 +120,20 @@ def cubic_spline_interp(x, y, x_interp):
     x0, x1 = x[i-1], x[i]
     y0, y1 = y[i-1], y[i]
     
-    # Calcula as derivadas nos extremos do intervalo
+    # Calcula as derivadas
     m0 = calc_derivative(x, y, 0 if i-1 == 0 else i-1, 'left' if i-1 == 0 else 'interior')
     m1 = calc_derivative(x, y, n-1 if i == n-1 else i, 'right' if i == n-1 else 'interior')
     
-    # Cálculo das segundas derivadas segundo as Equações 14 e 15
+    # Segundas derivadas (Equações 14 e 15)
     f2_x0 = (2 * (m1 - m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0)**2)
     f2_x1 = (2 * (m1 + m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0)**2)
     
-    # Cálculo dos coeficientes (Equações 16 a 19)
+    # Coeficientes (Equações 16 a 19)
     d = (f2_x1 - f2_x0) / (6 * (x1 - x0))
     c = (x1 * f2_x0 - x0 * f2_x1) / (2 * (x1 - x0))
     b = ((y1 - y0) - c * (x1**2 - x0**2) - d * (x1**3 - x0**3)) / (x1 - x0)
     a = y0 - b * x0 - c * (x0**2) - d * (x0**3)
     
-    # Avalia a spline no ponto x_interp (Equação 20)
     return a + b * x_interp + c * (x_interp**2) + d * (x_interp**3)
 
 # ====================================================================
@@ -150,18 +144,17 @@ def bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp)
     Realiza a interpolação bidimensional em dois eixos (delta e tempo):
 
       1. **Interpola no Eixo Delta:**  
-         Para cada linha da matriz de volatilidades (correspondente a um tempo),
-         interpola-se no eixo delta usando a função cubic_spline_interp com:
+         Para cada linha da matriz de volatilidades (cada tempo),
+         interpola-se no eixo delta usando cubic_spline_interp com:
            - x = deltas,
-           - y = linha da matriz (valores de volatilidade para cada delta),
+           - y = linha de volatilidades para aquele tempo,
            - x_interp = delta_interp.
-         O resultado é uma lista de valores interpolados, um para cada tempo.
-
+         O resultado é um vetor com um valor por tempo.
+      
       2. **Interpola no Eixo Tempo:**  
-         Com o vetor de valores obtido no passo anterior (um para cada tempo),
-         interpola-se no eixo tempo:
+         Com o vetor obtido, interpola-se no eixo tempo:
            - x = tempos,
-           - y = vetor de valores interpolados (por tempo),
+           - y = vetor de valores interpolados por tempo,
            - x_interp = tempo_interp.
          Retorna o valor final interpolado.
     """
@@ -176,24 +169,47 @@ def bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp)
 @udf(DoubleType())
 def interp_vol_udf(volatilidades, tempos, deltas, delta_interp, tempo_interp):
     """
-    UDF para uso em Spark que realiza a interpolação bidimensional.
+    UDF para Spark que realiza a interpolação bidimensional da superfície 
+    de volatilidade.
 
     Parâmetros de entrada:
-      - volatilidades: array linear de floats com tamanho = len(tempos)*len(deltas).  
-        Os valores devem estar ordenados de forma que os primeiros len(deltas)
-        elementos correspondam ao primeiro tempo, os próximos len(deltas) ao segundo, etc.
-      - tempos: array de floats (e.g., [t₁, t₂, ..., tₙ]), ordenado.
-      - deltas: array de floats (e.g., [d₁, d₂, ..., dₘ]), ordenado.
-      - delta_interp: valor float de consulta no eixo delta.
-      - tempo_interp: valor float de consulta no eixo tempo.
+      - volatilidades: array linear de floats com tamanho = N, onde cada 
+        posição corresponde a um ponto (tempo, delta) e pode haver repetições.
+      - tempos: array de floats representando os tempos (podem estar repetidos).
+      - deltas: array de floats representando os deltas (podem estar repetidos).
+      - delta_interp: float com o valor de consulta para o eixo delta.
+      - tempo_interp: float com o valor de consulta para o eixo tempo.
 
-    Processo:
-      1. Reconstroi-se a "matriz" de volatilidades a partir do array linear, 
-         particionando-o em n linhas, onde n = len(tempos) e cada linha tem m elementos (m = len(deltas)).
-      2. Chama a função bidimensional_interp para obter o valor interpolado.
-      3. Retorna o valor final.
+    Adaptação para dados repetidos:
+      - O código monta um dicionário mapeando (tempo, delta) → volatilidade.
+      - Em seguida, deduplica os arrays de tempos e deltas (usando set) e os 
+        ordena.
+      - Reconstroi a matriz de volatilidades com base na correspondência:
+          * Para cada tempo único (ordenado) e para cada delta único (ordenado),
+            usa-se o dicionário para obter o valor de volatilidade.
+      - Por fim, chama a função bidimensional_interp com os arrays únicos e 
+        a matriz reconstruída.
     """
-    n_d = len(deltas)
-    n_t = len(tempos)
-    vol_matrix = [volatilidades[i * n_d : (i + 1) * n_d] for i in range(n_t)]
-    return float(bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp))
+    n = len(volatilidades)
+    data_dict = {}
+    # Monta o dicionário: cada índice i representa um ponto (tempo, delta)
+    for i in range(n):
+        key = (tempos[i], deltas[i])
+        # Se houver duplicata, assume-se que os valores são idênticos
+        if key not in data_dict:
+            data_dict[key] = volatilidades[i]
+    
+    # Deduplica e ordena os eixos
+    unique_tempos = sorted(set(tempos))
+    unique_deltas = sorted(set(deltas))
+    
+    # Reconstrói a matriz de volatilidades: para cada tempo único, 
+    # cria uma linha com os valores correspondentes a cada delta único.
+    vol_matrix = []
+    for t in unique_tempos:
+        row = []
+        for d in unique_deltas:
+            row.append(data_dict[(t, d)])
+        vol_matrix.append(row)
+    
+    return float(bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, delta_interp, tempo_interp))
