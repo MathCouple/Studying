@@ -2,46 +2,42 @@
 def interpolar_2d(deltas: pd.Series, vencimentos: pd.Series, vols: pd.Series, 
                    delta_interp: pd.Series, t_interp: pd.Series) -> pd.Series:
     """
-    Implementação manual da interpolação cúbica bidimensional (Delta x Tempo)
-    usando as equações (14) a (20).
-
-    Entrada:
-      - deltas: Série com os valores de Delta.
-      - vencimentos: Série com os tempos (vencimentos).
-      - vols: Série com as volatilidades correspondentes.
-      - delta_interp: Valor de Delta alvo (em uma Série) para interpolação.
-      - t_interp: Valor de Tempo alvo (em uma Série) para interpolação.
-
-    Saída:
-      - Série com o valor interpolado da volatilidade para (delta_interp, t_interp).
+    Implementação manual da interpolação cúbica bidimensional (Delta x Tempo).
+    Corrigido para evitar StopIteration quando o valor de interpolação está fora dos limites.
     """
 
     # Ordenação dos dados para garantir interpolação correta
-    # Utilizamos lexsort para ordenar primeiramente por Delta e depois por Vencimento.
     sorted_indices = np.lexsort((vencimentos, deltas))
     x = deltas.iloc[sorted_indices].values      # Eixo Delta ordenado
     y = vencimentos.iloc[sorted_indices].values   # Eixo Tempo ordenado
     z = vols.iloc[sorted_indices].values          # Valores de volatilidade ordenados
 
     # Garantir que os pontos de interpolação estão dentro dos limites da grade
-    # Como pandas_udf trabalha com Series, usamos .iloc[0] para extrair o valor alvo.
     delta_target = np.clip(delta_interp.iloc[0], x.min(), x.max())
     t_target = np.clip(t_interp.iloc[0], y.min(), y.max())
 
-    # Função auxiliar para calcular os coeficientes cúbicos com base nas equações (14) a (19)
+    # Função auxiliar para encontrar o índice correto no intervalo
+    def encontrar_indice(arr, target):
+        """
+        Retorna o índice do intervalo correto para interpolação.
+        Se o valor for menor que o mínimo, retorna 1.
+        Se o valor for maior que o máximo, retorna len(arr)-1.
+        """
+        for idx in range(1, len(arr)):
+            if arr[idx-1] <= target < arr[idx]:
+                return idx
+        return len(arr) - 1  # Retorna o último intervalo válido
+
+    # Encontrar o índice no eixo Delta e no eixo Tempo
+    i = encontrar_indice(x, delta_target)
+    j = encontrar_indice(y, t_target)
+
+    # Função auxiliar para calcular os coeficientes cúbicos
     def calc_coef(arr: np.ndarray, val: np.ndarray, idx: int):
         """
         Calcula os coeficientes a, b, c, d para o intervalo [arr[idx-1], arr[idx]].
-        
-        Equações:
-          (14) e (15): f''(arr[idx-1]) e f''(arr[idx]) são aproximadas por:
-              f2_left = 2*(z[idx] - z[idx-1])/(arr[idx] - arr[idx-1])^2
-              (Usamos o mesmo valor para f2_right por simplificação)
-          (16): d = (f2_right - f2_left) / (6*(arr[idx] - arr[idx-1]))
-          (17): c = (arr[idx] * f2_left - arr[idx-1] * f2_right) / (2*(arr[idx] - arr[idx-1]))
-          (18): b = ((z[idx] - z[idx-1]) - c*(arr[idx]^2 - arr[idx-1]^2) - d*(arr[idx]^3 - arr[idx-1]^3)) / (arr[idx] - arr[idx-1])
-          (19): a = z[idx-1] - b*arr[idx-1] - c*arr[idx-1]^2 - d*arr[idx-1]^3
         """
+
         # Aproximação das segundas derivadas (Equações 14 e 15)
         f2_left = 2 * (val[idx] - val[idx-1]) / (arr[idx] - arr[idx-1])**2
         f2_right = f2_left  # Usando a mesma aproximação para ambos
@@ -56,52 +52,14 @@ def interpolar_2d(deltas: pd.Series, vencimentos: pd.Series, vols: pd.Series,
         a = val[idx-1] - b * arr[idx-1] - c * arr[idx-1]**2 - d * arr[idx-1]**3
         return a, b, c, d
 
-    # Encontrar o índice no eixo Delta: x[i-1] <= delta_target < x[i]
-    i = next(i for i in range(1, len(x)) if x[i-1] <= delta_target < x[i])
-    # Encontrar o índice no eixo Tempo: y[j-1] <= t_target < y[j]
-    j = next(j for j in range(1, len(y)) if y[j-1] <= t_target < y[j])
-
-    # Calcular os coeficientes para o intervalo correspondente no eixo Delta
+    # Calcular coeficientes para os eixos Delta e Tempo
     a_delta, b_delta, c_delta, d_delta = calc_coef(x, z, i)
-    # Calcular os coeficientes para o intervalo correspondente no eixo Tempo
     a_time, b_time, c_time, d_time = calc_coef(y, z, j)
 
     # Equação (20): Aplicação da interpolação cúbica bidimensional
-    # Soma as contribuições dos dois eixos para obter o valor interpolado.
     vol_interpolado = (
         a_delta + b_delta * delta_target + c_delta * delta_target**2 + d_delta * delta_target**3 +
         a_time + b_time * t_target + c_time * t_target**2 + d_time * t_target**3
     )
 
     return pd.Series(vol_interpolado)
-
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lit
-import pandas as pd
-
-# Criando a Spark Session
-spark = SparkSession.builder.appName("Interpolacao2D_Aplicacao").getOrCreate()
-
-# Exemplo de Dados: Delta, Tempo (Dias) e Volatilidade Implícita
-data = [
-    (0.05, 1, 0.25), (0.05, 7, 0.28), (0.05, 14, 0.30),
-    (0.05, 30, 0.32), (0.05, 60, 0.35), (0.10, 1, 0.20),
-    (0.10, 7, 0.22), (0.10, 14, 0.24), (0.10, 30, 0.26),
-    (0.10, 60, 0.29)
-]
-df = spark.createDataFrame(data, ["Delta", "Vencimento", "Vol"])
-
-# Especificando o Delta e Tempo alvo para interpolação
-delta_target = 0.07  # Interpolação para Delta = 7%
-t_target = 10        # Interpolação para Vencimento = 10 dias
-
-# Aplicando a função de interpolação diretamente no DataFrame Spark
-df_resultado = df.select(
-    interpolar_2d(
-        col("Delta"), col("Vencimento"), col("Vol"),
-        lit(delta_target), lit(t_target)
-    ).alias("Volatilidade_Interpolada")
-)
-
-# Exibir o resultado final
-df_resultado.show()
