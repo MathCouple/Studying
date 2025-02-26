@@ -1,7 +1,10 @@
-from pyspark.sql.functions import pandas_udf
-import pandas as pd
+from pyspark.sql.functions import pandas_udf, col, monotonically_increasing_id
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
-from typing import Iterator
+import pandas as pd
+
+###############################################
+# Funções de Interpolação (Equações 14 a 20)
+###############################################
 
 # ====================================================================
 # Função: calc_derivative
@@ -112,7 +115,7 @@ def cubic_spline_interp(x, y, x_interp):
             return y[0]
         if x_interp >= x[1]:
             return y[1]
-        return y[0] + (y[1]-y[0]) * ((x_interp - x[0])/(x[1]-x[0]))
+        return y[0] + (y[1]-y[0])*((x_interp-x[0])/(x[1]-x[0]))
     
     if x_interp <= x[0]:
         return y[0]
@@ -123,12 +126,12 @@ def cubic_spline_interp(x, y, x_interp):
         i += 1
     x0, x1 = x[i-1], x[i]
     y0, y1 = y[i-1], y[i]
-    m0 = calc_derivative(x, y, 0 if i-1 == 0 else i-1, 'left' if i-1 == 0 else 'interior')
-    m1 = calc_derivative(x, y, n-1 if i == n-1 else i, 'right' if i == n-1 else 'interior')
+    m0 = calc_derivative(x, y, 0 if i-1==0 else i-1, 'left' if i-1==0 else 'interior')
+    m1 = calc_derivative(x, y, n-1 if i==n-1 else i, 'right' if i==n-1 else 'interior')
     f2_x0 = (2*(m1-m0))/(x1-x0) + 6*(y1-y0)/((x1-x0)**2)
     f2_x1 = (2*(m1+m0))/(x1-x0) + 6*(y1-y0)/((x1-x0)**2)
     d = (f2_x1 - f2_x0) / (6*(x1-x0))
-    c = (x1 * f2_x0 - x0 * f2_x1) / (2*(x1-x0))
+    c = (x1*f2_x0 - x0*f2_x1) / (2*(x1-x0))
     b = ((y1-y0) - c*(x1**2-x0**2) - d*(x1**3-x0**3)) / (x1-x0)
     a = y0 - b*x0 - c*(x0**2) - d*(x0**3)
     return a + b*x_interp + c*(x_interp**2) + d*(x_interp**3)
@@ -150,9 +153,9 @@ def bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp)
     interp_por_tempo = [cubic_spline_interp(deltas, row, delta_interp) for row in vol_matrix]
     return cubic_spline_interp(tempos, interp_por_tempo, tempo_interp)
 
-# ====================================================================
+###############################################
 # Função Auxiliar: compute_multi_interp
-# ====================================================================
+###############################################
 def compute_multi_interp(volatilidades, tempos, deltas, query_deltas, query_tempos, ativo, data_referencia):
     """
     Processa uma única linha de entrada (com arrays de dados medidos e de consulta)
@@ -163,16 +166,20 @@ def compute_multi_interp(volatilidades, tempos, deltas, query_deltas, query_temp
 
     Se houver mais de uma medição para o mesmo par (tempo, delta), soma os valores.
     """
+    # Monta o dicionário utilizando zip para maior eficiência
     data_dict = {}
     for t, d, v in zip(tempos, deltas, volatilidades):
         key = (t, d)
         data_dict[key] = data_dict.get(key, 0.0) + v
 
+    # Deduplica e ordena os eixos
     unique_tempos = sorted({t for t in tempos})
     unique_deltas = sorted({d for d in deltas})
+    # Reconstrói a matriz 2D de volatilidades
     vol_matrix = [[data_dict.get((t, d), 0.0) for d in unique_deltas] for t in unique_tempos]
     
     result_list = []
+    # Itera apenas sobre os pontos de consulta fornecidos
     for qt in query_tempos:
         for qd in query_deltas:
             interp_val = bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, qd, qt)
@@ -189,49 +196,43 @@ def compute_multi_interp(volatilidades, tempos, deltas, query_deltas, query_temp
             })
     return result_list
 
-# ====================================================================
-# UDF: multi_interp_iterator_udf (pandas_udf do tipo iterator)
-# ====================================================================
-# Define o esquema de saída
+###############################################
+# UDF do Tipo GROUPED_MAP (pandas_udf antigo)
+###############################################
+# Definimos o esquema de saída do UDF
 output_schema = StructType([
     StructField("Data_referencia", StringType(), False),
     StructField("chave", StringType(), False),
     StructField("Volatilidade_Interpolada", DoubleType(), False)
 ])
 
-@pandas_udf(output_schema, functionType="iterator")
-def multi_interp_iterator_udf(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+@pandas_udf(output_schema, functionType="grouped_map")
+def multi_interp_grouped_udf(pdf: pd.DataFrame) -> pd.DataFrame:
     """
-    Pandas UDF do tipo iterator que realiza a interpolação bidimensional da superfície de volatilidade.
-    Para cada partição (um DataFrame pandas), itera sobre as linhas de entrada e, para cada uma,
-    utiliza compute_multi_interp para gerar as linhas de saída. Retorna um DataFrame com as colunas:
+    UDF do tipo GROUPED_MAP que realiza a interpolação bidimensional da superfície de volatilidade.
+    Para cada grupo (correspondendo a uma linha de entrada), utiliza compute_multi_interp para gerar
+    um DataFrame com as colunas:
       - Data_referencia
       - chave (formato "Ativo_{delta_formatado}_{tempo_formatado}")
       - Volatilidade_Interpolada
     """
-    for pdf in iterator:
-        results = []
-        for _, row in pdf.iterrows():
-            # Cada coluna já é um objeto Python (lista, string, etc.)
-            res = compute_multi_interp(
-                row["volatilidades"], 
-                row["tempos"], 
-                row["deltas"], 
-                row["query_deltas"], 
-                row["query_tempos"], 
-                row["Ativo"], 
-                row["Data_referencia"]
-            )
-            results.extend(res)
-        if results:
-            yield pd.DataFrame(results)
-        else:
-            yield pd.DataFrame([], columns=["Data_referencia", "chave", "Volatilidade_Interpolada"])
+    # Como cada grupo deve corresponder a uma única linha, pegamos a primeira linha
+    row = pdf.iloc[0]
+    ativo = row["Ativo"]
+    data_ref = row["Data_referencia"]
+    volatilidades = row["volatilidades"]
+    tempos = row["tempos"]
+    deltas = row["deltas"]
+    query_deltas = row["query_deltas"]
+    query_tempos = row["query_tempos"]
+    
+    result_list = compute_multi_interp(volatilidades, tempos, deltas, query_deltas, query_tempos, ativo, data_ref)
+    return pd.DataFrame(result_list)
 
-# ====================================================================
+###############################################
 # Exemplo de Aplicação no DataFrame de Consulta
-# ====================================================================
-# Suponha que seu DataFrame de consulta contenha as seguintes colunas:
+###############################################
+# Suponha que seu DataFrame de consulta contenha as colunas:
 #   - Ativo
 #   - Data_referencia
 #   - volatilidades: array de floats (dados medidos)
@@ -239,11 +240,12 @@ def multi_interp_iterator_udf(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.D
 #   - deltas: array de floats (dados medidos)
 #   - query_deltas: array de floats com os deltas de consulta
 #   - query_tempos: array de floats com os tempos de consulta
+
 data = [
     (
         "ABC",                     # Ativo
         "2025-03-31",              # Data_referencia
-        [0.3, 0.5, 0.6, 0.1],        # volatilidades: ex. índice 0 -> (tempo=1.0, delta=0.05), 1 -> (tempo=2.0, delta=0.05), etc.
+        [0.3, 0.5, 0.6, 0.1],        # volatilidades: ex. índice 0 -> (tempo=1.0, delta=0.05), índice 1 -> (tempo=2.0, delta=0.05), etc.
         [1.0, 2.0, 1.0, 2.0],        # tempos
         [0.05, 0.05, 0.1, 0.1],       # deltas
         [0.075, 0.085],             # query_deltas: apenas os valores de consulta
@@ -253,7 +255,10 @@ data = [
 columns = ["Ativo", "Data_referencia", "volatilidades", "tempos", "deltas", "query_deltas", "query_tempos"]
 df = spark.createDataFrame(data, schema=columns)
 
-# Aplica a UDF do tipo iterator; ela retorna já um DataFrame com as linhas formatadas.
-final_df = df.select(multi_interp_iterator_udf("volatilidades", "tempos", "deltas", "query_deltas", "query_tempos", "Ativo", "Data_referencia").alias("result")).select("result.*")
+# Para que cada registro seja processado individualmente com GROUPED_MAP, adicionamos uma coluna 'id'
+df = df.withColumn("id", monotonically_increasing_id())
+
+# Aplica o UDF agrupando por 'id'
+final_df = df.groupBy("id").apply(multi_interp_grouped_udf).drop("id")
 
 final_df.show(truncate=False)
