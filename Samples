@@ -15,12 +15,12 @@ def interpolar_2d(
     z = vols.iloc[sorted_indices].values  # Volatilidades ordenadas
 
     # Garantir que os valores de interpolação estão dentro da grade
-    delta_interp = np.clip(delta_interp.iloc[0], x.min(), x.max())
-    t_interp = np.clip(t_interp.iloc[0], y.min(), y.max())
+    delta_interp_value = np.clip(delta_interp.iloc[0], x.min(), x.max())
+    t_interp_value = np.clip(t_interp.iloc[0], y.min(), y.max())
 
-    # Encontrar os índices mais próximos nos eixos Delta e Tempo
-    i = next(i for i in range(1, len(x)) if x[i-1] <= delta_interp < x[i])
-    j = next(j for j in range(1, len(y)) if y[j-1] <= t_interp < y[j])
+    # Evitar erro de StopIteration garantindo que os índices existam
+    i = next((i for i in range(1, len(x)) if x[i-1] <= delta_interp_value < x[i]), len(x) - 1)
+    j = next((j for j in range(1, len(y)) if y[j-1] <= t_interp_value < y[j]), len(y) - 1)
 
     # Cálculo das segundas derivadas (Equações 14 e 15)
     f2_x_i_1 = (2 * (z[i] - z[i-1]) / (x[i] - x[i-1])**2)
@@ -43,42 +43,8 @@ def interpolar_2d(
 
     # Aplicação da interpolação cúbica bidimensional (Equação 20)
     vol_interpolado = (
-        a_i + b_i * delta_interp + c_i * delta_interp**2 + d_i * delta_interp**3 +
-        a_j + b_j * t_interp + c_j * t_interp**2 + d_j * t_interp**3
+        a_i + b_i * delta_interp_value + c_i * delta_interp_value**2 + d_i * delta_interp_value**3 +
+        a_j + b_j * t_interp_value + c_j * t_interp_value**2 + d_j * t_interp_value**3
     )
 
     return pd.Series([vol_interpolado])  # Retorna uma Series conforme esperado pelo PySpark
-
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import lit
-
-# Criar sessão Spark
-spark = SparkSession.builder.appName("TesteInterpolacao2D").getOrCreate()
-
-# Criar DataFrame com exemplo de Delta, Tempo e Volatilidade
-data = [
-    (0.05, 1, 0.25), (0.05, 7, 0.28), (0.05, 14, 0.30),
-    (0.05, 30, 0.32), (0.05, 60, 0.35), (0.10, 1, 0.20),
-    (0.10, 7, 0.22), (0.10, 14, 0.24), (0.10, 30, 0.26),
-    (0.10, 60, 0.29)
-]
-df = spark.createDataFrame(data, ["Delta", "Vencimento", "Vol"])
-
-# Definir os valores alvo para interpolação
-delta_target = 0.07
-t_target = 10
-
-# Criar colunas com os valores de interpolação
-df_interp = df.withColumn("Delta_Target", lit(delta_target)).withColumn("Vencimento_Target", lit(t_target))
-
-# Aplicar a interpolação diretamente no DataFrame
-df_resultado = df_interp.withColumn(
-    "Vol_Interpolado",
-    interpolar_2d(
-        col("Delta"), col("Vencimento"), col("Vol"),
-        col("Delta_Target"), col("Vencimento_Target")
-    )
-)
-
-# Exibir o resultado
-df_resultado.show()
