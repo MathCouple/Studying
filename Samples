@@ -1,132 +1,138 @@
-Entendido! Agora vamos transformar a função em uma pandas_udf para uso no PySpark, garantindo que ela receba colunas do DataFrame e retorne um único valor interpolado corretamente.
-
-
----
-
-📌 O Que Esta Função Faz?
-
-✅ Recebe colunas do DataFrame PySpark contendo Deltas, Vencimentos e Volatilidades.
-✅ Recebe também um único par  a ser interpolado.
-✅ Aplica interpolação cúbica bidimensional baseada nas equações (14) a (20).
-✅ Retorna um único valor interpolado corretamente.
-
-
----
-
-📌 Código Final com pandas_udf
-
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import pandas_udf, col
+from pyspark.sql.functions import udf
 from pyspark.sql.types import DoubleType
-import pandas as pd
-import numpy as np
 
-# Criar sessão Spark
-spark = SparkSession.builder.appName("Interpolacao2D").getOrCreate()
+# Função auxiliar para calcular a derivada segundo as regras (passos 5, 6 e 7)
+def calc_derivative(x, y, idx, side):
+    n = len(x)
+    # side pode ser 'left', 'right' ou 'interior'
+    if side == 'left':  # primeiro ponto (x₀)
+        if n > 2:
+            cond = ((x[2] - x[1]) / (y[2] - y[1])) - ((x[1] - x[0]) / (y[1] - y[0]))
+            if cond < 0:
+                # Se a condição for satisfeita, usa a diferença simples
+                fprime = (y[1] - y[0]) / (x[1] - x[0])
+            else:
+                # Caso contrário, utiliza a fórmula conforme passo (5)
+                fprime_next = (y[2] - y[1]) / (x[2] - x[1])
+                fprime = (3 * (y[1] - y[0]) / (2 * (x[1] - x[0]))) - (fprime_next / 2)
+        else:
+            fprime = (y[1] - y[0]) / (x[1] - x[0])
+        return fprime
 
-@pandas_udf(DoubleType())
-def interpolar_2d(
-    deltas: pd.Series, vencimentos: pd.Series, vols: pd.Series, 
-    delta_interp: float, t_interp: float
-) -> pd.Series:
-    """
-    Implementação manual da interpolação cúbica bidimensional (Delta x Tempo).
-    Utiliza as equações (14) a (20) diretamente no código.
+    elif side == 'right':  # último ponto (xₙ₋₁)
+        if n > 2:
+            cond = ((x[n-1] - x[n-2]) / (y[n-1] - y[n-2])) - ((x[n-2] - x[n-3]) / (y[n-2] - y[n-3]))
+            if cond < 0:
+                fprime = (y[n-1] - y[n-2]) / (x[n-1] - x[n-2])
+            else:
+                fprime_temp = (y[n-1] - y[n-2]) / (x[n-1] - x[n-2])
+                fprime = (3 * (y[n-1] - y[n-2]) / (2 * (x[n-1] - x[n-2]))) - (fprime_temp / 2)
+        else:
+            fprime = (y[n-1] - y[n-2]) / (x[n-1] - x[n-2])
+        return fprime
 
-    Parâmetros:
-    - deltas: Série com valores de Delta (coluna do DataFrame).
-    - vencimentos: Série com valores de Tempo/Vencimento (coluna do DataFrame).
-    - vols: Série com volatilidades correspondentes.
-    - delta_interp: O Delta alvo da interpolação.
-    - t_interp: O Vencimento alvo da interpolação.
+    else:  # ponto interior
+        if idx + 1 < n - 1:
+            cond = ((x[idx+2] - x[idx+1]) / (y[idx+2] - y[idx+1])) - ((x[idx+1] - x[idx]) / (y[idx+1] - y[idx]))
+            if cond < 0:
+                # Se a condição for satisfeita, usa a diferença centrada
+                fprime = (y[idx+1] - y[idx-1]) / (x[idx+1] - x[idx-1])
+            else:
+                fprime_next = (y[idx+2] - y[idx+1]) / (x[idx+2] - x[idx+1])
+                fprime = (3 * (y[idx+1] - y[idx]) / (2 * (x[idx+1] - x[idx]))) - (fprime_next / 2)
+        else:
+            # Se não há ponto à frente para comparar, usa a diferença simples
+            fprime = (y[idx] - y[idx-1]) / (x[idx] - x[idx-1])
+        return fprime
 
-    Retorna:
-    - Um único valor de volatilidade interpolada para (delta_interp, t_interp).
-    """
+# Função que realiza a interpolação cúbica constrained unidimensional
+def cubic_spline_interp(x, y, x_interp):
+    n = len(x)
+    if n < 2:
+        return None
+    # Ajusta fronteiras
+    if x_interp <= x[0]:
+        return y[0]
+    if x_interp >= x[-1]:
+        return y[-1]
+    # Encontra o intervalo: índice i tal que x[i-1] <= x_interp <= x[i]
+    i = 1
+    while i < n and x_interp > x[i]:
+        i += 1
+    x0, x1 = x[i-1], x[i]
+    y0, y1 = y[i-1], y[i]
 
-    # Converter para numpy arrays para garantir eficiência nos cálculos
-    x = deltas.values
-    y = vencimentos.values
-    z = vols.values
+    # Calcula as derivadas nos extremos do intervalo conforme as regras
+    if i-1 == 0:
+        m0 = calc_derivative(x, y, 0, 'left')
+    else:
+        m0 = calc_derivative(x, y, i-1, 'interior')
 
-    # Garantir que os valores de interpolação estão dentro dos limites conhecidos
-    delta_interp = np.clip(delta_interp, x.min(), x.max())
-    t_interp = np.clip(t_interp, y.min(), y.max())
+    if i == n-1:
+        m1 = calc_derivative(x, y, n-1, 'right')
+    else:
+        m1 = calc_derivative(x, y, i, 'interior')
 
-    # Encontrar os índices mais próximos nos eixos Delta e Tempo
-    i = next((i for i in range(1, len(x)) if x[i-1] <= delta_interp < x[i]), len(x) - 1)
-    j = next((j for j in range(1, len(y)) if y[j-1] <= t_interp < y[j]), len(y) - 1)
+    # Cálculo das segundas derivadas (Equações 14 e 15)
+    f2_x0 = (2 * (m1 - m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0) ** 2)
+    f2_x1 = (2 * (m1 + m0)) / (x1 - x0) + (6 * (y1 - y0)) / ((x1 - x0) ** 2)
 
-    # **Cálculo das segundas derivadas (Equações 14 e 15)**
-    f2_x_i_1 = (2 * (z[i] - z[i-1]) / (x[i] - x[i-1])**2)
-    f2_x_i = (2 * (z[i] - z[i-1]) / (x[i] - x[i-1])**2)
+    # Cálculo dos coeficientes (Equações 16 a 19)
+    d = (f2_x1 - f2_x0) / (6 * (x1 - x0))                      # Eq (16)
+    c = (x1 * f2_x0 - x0 * f2_x1) / (2 * (x1 - x0))              # Eq (17)
+    b = ((y1 - y0) - c * (x1**2 - x0**2) - d * (x1**3 - x0**3)) / (x1 - x0)  # Eq (18)
+    a = y0 - b * x0 - c * x0**2 - d * x0**3                      # Eq (19)
 
-    f2_y_j_1 = (2 * (z[j] - z[j-1]) / (y[j] - y[j-1])**2)
-    f2_y_j = (2 * (z[j] - z[j-1]) / (y[j] - y[j-1])**2)
+    # Avaliação da spline no ponto x_interp (Equação 20)
+    return a + b * x_interp + c * (x_interp ** 2) + d * (x_interp ** 3)
 
-    # **Coeficientes cúbicos para Delta (Equações 16 a 19)**
-    d_i = (f2_x_i - f2_x_i_1) / (6 * (x[i] - x[i-1]))
-    c_i = (x[i] * f2_x_i_1 - x[i-1] * f2_x_i) / (2 * (x[i] - x[i-1]))
-    b_i = ((z[i] - z[i-1]) - c_i * (x[i]**2 - x[i-1]**2) - d_i * (x[i]**3 - x[i-1]**3)) / (x[i] - x[i-1])
-    a_i = z[i-1] - b_i * x[i-1] - c_i * x[i-1]**2 - d_i * x[i-1]**3
+# Função para interpolação bidimensional
+def bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp):
+    # Primeiro: para cada linha (tempo) da matriz, interpola no eixo delta
+    interp_por_tempo = []
+    for vol_row in vol_matrix:
+        interp_val = cubic_spline_interp(deltas, vol_row, delta_interp)
+        interp_por_tempo.append(interp_val)
+    # Segundo: interpola os valores obtidos no eixo tempo
+    return cubic_spline_interp(tempos, interp_por_tempo, tempo_interp)
 
-    # **Coeficientes cúbicos para Tempo (Equações 16 a 19)**
-    d_j = (f2_y_j - f2_y_j_1) / (6 * (y[j] - y[j-1]))
-    c_j = (y[j] * f2_y_j_1 - y[j-1] * f2_y_j) / (2 * (y[j] - y[j-1]))
-    b_j = ((z[j] - z[j-1]) - c_j * (y[j]**2 - y[j-1]**2) - d_j * (y[j]**3 - y[j-1]**3)) / (y[j] - y[j-1])
-    a_j = z[j-1] - b_j * y[j-1] - c_j * y[j-1]**2 - d_j * y[j-1]**3
+# UDF – a função recebe [deltas], [vol_matrix], [tempos], delta_interp e tempo_interp
+@udf(DoubleType())
+def bidim_interp_udf(deltas, vol_matrix, tempos, delta_interp, tempo_interp):
+    try:
+        return float(bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp))
+    except Exception as e:
+        return None
 
-    # **Aplicação da interpolação cúbica bidimensional (Equação 20)**
-    vol_interpolado = (
-        a_i + b_i * delta_interp + c_i * delta_interp**2 + d_i * delta_interp**3 +
-        a_j + b_j * t_interp + c_j * t_interp**2 + d_j * t_interp**3
-    )
+# --- Criação de um Spark DataFrame de teste ---
+# Exemplo de dados:
+# - "deltas": vetor de deltas
+# - "tempos": vetor de tempos (vencimentos)
+# - "vol_matrix": matriz de volatilidades (cada linha corresponde a um tempo)
+# - "delta_interp" e "tempo_interp": pontos a serem interpolados
 
-    return pd.Series(vol_interpolado)
-
-
----
-
-📌 Como Testar no PySpark
-
-Agora aplicamos a UDF ao DataFrame PySpark, passando as colunas corretas e os valores de interpolação.
-
-from pyspark.sql.functions import lit
-
-# Criar DataFrame com Delta, Vencimento e Volatilidade
 data = [
-    (0.05, 1, 0.25), (0.05, 7, 0.28), (0.05, 14, 0.30),
-    (0.05, 30, 0.32), (0.05, 60, 0.35), (0.10, 1, 0.20),
-    (0.10, 7, 0.22), (0.10, 14, 0.24), (0.10, 30, 0.26),
-    (0.10, 60, 0.29)
-]
-df = spark.createDataFrame(data, ["Delta", "Vencimento", "Vol"])
-
-# Definir Delta e Tempo que queremos interpolar
-delta_target = 0.07
-t_target = 10
-
-# Aplicar a interpolação diretamente no DataFrame PySpark
-df_resultado = df.withColumn(
-    "Vol_Interpolado",
-    interpolar_2d(
-        col("Delta"), col("Vencimento"), col("Vol"),
-        lit(delta_target), lit(t_target)
+    (
+        [0.1, 0.2, 0.3, 0.4],     # deltas
+        [1.0, 2.0, 3.0, 4.0],     # tempos
+        [                         # vol_matrix: cada linha para um tempo
+            [10, 20, 30, 40],     # tempo = 1.0
+            [11, 21, 31, 41],     # tempo = 2.0
+            [12, 22, 32, 42],     # tempo = 3.0
+            [13, 23, 33, 43]      # tempo = 4.0
+        ],
+        0.25,   # delta_interp
+        2.5     # tempo_interp
     )
-)
+]
 
-df_resultado.show()
+columns = ["deltas", "tempos", "vol_matrix", "delta_interp", "tempo_interp"]
 
+# Considerando que a sessão Spark já foi criada
+df_teste = spark.createDataFrame(data, schema=columns)
 
----
+# Aplica a UDF e cria a coluna "vol_interpolated"
+df_teste = df_teste.withColumn("vol_interpolated", bidim_interp_udf("deltas", "vol_matrix", "tempos", "delta_interp", "tempo_interp"))
 
-📌 Exemplo de Saída
-
-Se rodarmos para Delta = 0.07 e Tempo = 10 dias, podemos obter algo como:
-
-+-----+----------+-----+---------------+
-|Delta|Vencimento| Vol |Vol_Interpolado|
-+-----+----------+-----+---------------+
-| 0.05|        1| 0.25|         0.2625 |
-| 0.05|        7
-
+# Exibe o DataFrame de teste
+df_teste.show(truncate=False)
