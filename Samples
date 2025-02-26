@@ -1,29 +1,8 @@
-A seguir, a versão final do código, com todas as docstrings e comentários em português, além de diversas otimizações para reduzir o consumo de CPU/memória e melhorar o desempenho quando houver muitos dados. As principais alterações foram:
-
-1. Uso de defaultdict para montar o dicionário de dados medidos (em vez de um loop com get() manual).
-
-
-2. Substituição do loop "while" para localizar o intervalo em cubic_spline_interp por uma busca binária (usando bisect_left).
-
-
-3. Uso de list comprehensions para construir os eixos únicos e a matriz 2D.
-
-
-4. Garantia de que a iteração para gerar os resultados seja feita apenas para os pontos de consulta passados.
-
-
-
-A lógica final (as fórmulas das Equações 14 a 20, com a Equação 16 corrigida) permanece inalterada.
-
-
----
-
-from pyspark.sql.functions import pandas_udtf
+from pyspark.sql.functions import pandas_udf, col
 import pandas as pd
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 from bisect import bisect_left
 from collections import defaultdict
-from typing import Iterator
 
 # ====================================================================
 # Função: calc_derivative
@@ -96,213 +75,55 @@ def calc_derivative(x, y, idx, side):
             return (y[idx] - y[idx-1]) / (x[idx] - x[idx-1])
 
 # ====================================================================
-# Função: cubic_spline_interp
-# ====================================================================
-def cubic_spline_interp(x, y, x_interp):
-    """
-    Realiza a interpolação cúbica "constrained" unidimensional usando as 
-    Equações (14) a (20).
-
-    Passos:
-      1. Verificação de Fronteira:
-         Se x_interp for menor ou igual ao primeiro ponto de x, retorna y[0].
-         Se x_interp for maior ou igual ao último ponto, retorna y[-1].
-      2. Localização do Intervalo:
-         Encontra o índice i tal que x[i-1] ≤ x_interp < x[i] usando busca binária.
-      3. Cálculo das Derivadas (f'):
-         Utiliza a função calc_derivative para obter:
-           - m₀ = f'(x[i-1]) (usando 'left' se for o primeiro ou 'interior' caso contrário).
-           - m₁ = f'(x[i]) (usando 'right' se for o último ou 'interior').
-      4. Cálculo das Segundas Derivadas (f″):
-         Aplica as Equações:
-           - f″(x[i-1]) = [2(m₁ - m₀)] / (x[i]-x[i-1]) + [6(y[i]-y[i-1])] / (x[i]-x[i-1])²  (Equação 14)
-           - f″(x[i])   = [2(m₁ + m₀)] / (x[i]-x[i-1]) + [6(y[i]-y[i-1])] / (x[i]-x[i-1])²  (Equação 15)
-      5. Cálculo dos Coeficientes da Spline:
-         Calcula os coeficientes:
-           - d = [f″(x[i]) - f″(x[i-1])] / [6(x[i]-x[i-1])]  (Equação 16)
-           - c = [x[i]*f″(x[i-1]) - x[i-1]*f″(x[i])] / [2(x[i]-x[i-1])]  (Equação 17)
-           - b = { (y[i]-y[i-1]) - c*(x[i]² - x[i-1]²) - d*(x[i]³ - x[i-1]³) } / (x[i]-x[i-1])  (Equação 18)
-           - a = y[i-1] - b*x[i-1] - c*x[i-1]² - d*x[i-1]³  (Equação 19)
-      6. Avaliação da Spline:
-         Retorna:
-           y(x_interp) = a + b*x_interp + c*x_interp² + d*x_interp³  (Equação 20)
-
-    Caso haja apenas 2 pontos, utiliza interpolação linear.
-    """
-    n = len(x)
-    if n == 2:
-        if x_interp <= x[0]:
-            return y[0]
-        if x_interp >= x[1]:
-            return y[1]
-        return y[0] + (y[1]-y[0])*((x_interp-x[0])/(x[1]-x[0]))
-    
-    if x_interp <= x[0]:
-        return y[0]
-    if x_interp >= x[-1]:
-        return y[-1]
-    # Usa busca binária para encontrar o índice i
-    i = bisect_left(x, x_interp)
-    if i == 0:
-        return y[0]
-    if i == n:
-        return y[-1]
-    x0, x1 = x[i-1], x[i]
-    y0, y1 = y[i-1], y[i]
-    m0 = calc_derivative(x, y, i-1, 'left' if i-1==0 else 'interior')
-    m1 = calc_derivative(x, y, i, 'right' if i==n-1 else 'interior')
-    f2_x0 = (2*(m1-m0))/(x1-x0) + 6*(y1-y0)/((x1-x0)**2)
-    f2_x1 = (2*(m1+m0))/(x1-x0) + 6*(y1-y0)/((x1-x0)**2)
-    d = (f2_x1 - f2_x0) / (6*(x1-x0))
-    c = (x1*f2_x0 - x0*f2_x1) / (2*(x1-x0))
-    b = ((y1-y0) - c*(x1**2-x0**2) - d*(x1**3-x0**3)) / (x1-x0)
-    a = y0 - b*x0 - c*(x0**2) - d*(x0**3)
-    return a + b*x_interp + c*(x_interp**2) + d*(x_interp**3)
-
-# ====================================================================
 # Função: bidimensional_interp
 # ====================================================================
 def bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp):
-    """
-    Realiza a interpolação bidimensional nos eixos delta e tempo.
-
-    Passos:
-      1. Para cada linha da matriz de volatilidades (cada tempo), interpola no eixo delta
-         utilizando cubic_spline_interp (com x = deltas e y = linha) para obter um valor.
-      2. Com o vetor resultante (um valor por tempo), interpola no eixo tempo
-         (com x = tempos e y = vetor resultante) para obter o valor final.
-    """
+    """ Realiza interpolação bidimensional em dois eixos (delta e tempo). """
     interp_por_tempo = [cubic_spline_interp(deltas, row, delta_interp) for row in vol_matrix]
     return cubic_spline_interp(tempos, interp_por_tempo, tempo_interp)
 
 # ====================================================================
-# Função Auxiliar: compute_multi_interp
+# UDF: multi_interp_udf
 # ====================================================================
-def compute_multi_interp(volatilidades, tempos, deltas, query_deltas, query_tempos, ativo, data_referencia):
-    """
-    Processa uma única linha de entrada (arrays de dados medidos e de consulta)
-    e retorna uma lista de dicionários, cada um representando uma linha de saída com:
-      - Data_referencia
-      - chave (formada por ativo, delta e tempo de consulta)
-      - Volatilidade_Interpolada
-
-    Se houver mais de uma medição para o mesmo par (tempo, delta), os valores são somados.
-    """
-    # Usa defaultdict para somar valores duplicados
-    data_dict = defaultdict(float)
-    for t, d, v in zip(tempos, deltas, volatilidades):
-        data_dict[(t, d)] += v
-
-    unique_tempos = sorted({t for t, _ in data_dict.keys()})
-    unique_deltas = sorted({d for _, d in data_dict.keys()})
-    vol_matrix = [[data_dict.get((t, d), 0.0) for d in unique_deltas] for t in unique_tempos]
-
-    # Processa somente as combinações de query_deltas e query_tempos passados
-    result_list = [
-        {
-            "Data_referencia": data_referencia,
-            "chave": f"{ativo}_{str(int(round(qd*10))).zfill(3)}_{str(int(qt)).zfill(5)}",
-            "Volatilidade_Interpolada": bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, qd, qt)
-        }
-        for qt in query_tempos
-        for qd in query_deltas
-    ]
-    return result_list
-
-# ====================================================================
-# UDTF: multi_interp_udtf
-# ====================================================================
-# Schema do resultado: já retorna um DataFrame com as colunas desejadas.
 output_schema = StructType([
     StructField("Data_referencia", StringType(), False),
     StructField("chave", StringType(), False),
     StructField("Volatilidade_Interpolada", DoubleType(), False)
 ])
 
-@pandas_udtf(output_schema, functionType="iterator")
-def multi_interp_udtf(volatilidades: pd.Series,
+@pandas_udf(output_schema)
+def multi_interp_udf(volatilidades: pd.Series,
                       tempos: pd.Series,
                       deltas: pd.Series,
                       query_deltas: pd.Series,
                       query_tempos: pd.Series,
                       ativo: pd.Series,
-                      data_referencia: pd.Series) -> Iterator[pd.DataFrame]:
-    """
-    UDTF que realiza a interpolação bidimensional da superfície de volatilidade.
-    Para cada registro de entrada (com arrays de dados medidos e de consulta, além do ativo e data_referencia),
-    retorna um DataFrame com as colunas:
-      - Data_referencia
-      - chave (formato "Ativo_{delta_formatado}_{tempo_formatado}")
-      - Volatilidade_Interpolada
+                      data_referencia: pd.Series) -> pd.DataFrame:
+    """ UDF Pandas para Spark que realiza interpolação bidimensional. """
+    results = []
+    for vol, t, d, qd, qt, a, dr in zip(volatilidades, tempos, deltas, query_deltas, query_tempos, ativo, data_referencia):
+        data_dict = defaultdict(float)
+        for ti, di, vi in zip(t, d, vol):
+            data_dict[(ti, di)] += vi
 
-    Otimizações:
-      - Utiliza defaultdict para soma de duplicatas.
-      - Usa bisect para busca binária em cubic_spline_interp.
-      - Processa apenas os pontos de consulta passados.
-    """
-    for i in range(len(volatilidades)):
-        # Usa zip para iterar sobre os arrays correspondentes
-        vol = volatilidades.iloc[i]
-        t = tempos.iloc[i]
-        d = deltas.iloc[i]
-        qd = query_deltas.iloc[i]
-        qt = query_tempos.iloc[i]
-        a = ativo.iloc[i]
-        dr = data_referencia.iloc[i]
-        result_list = compute_multi_interp(vol, t, d, qd, qt, a, dr)
-        yield pd.DataFrame(result_list)
+        unique_tempos = sorted(set(t))
+        unique_deltas = sorted(set(d))
+        vol_matrix = [[data_dict[(ti, di)] for di in unique_deltas] for ti in unique_tempos]
+
+        for qti in qt:
+            for qdi in qd:
+                chave = f"{a}_{str(int(round(qdi * 10))).zfill(3)}_{str(int(qti)).zfill(5)}"
+                interp_val = bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, qdi, qti)
+                results.append((dr, chave, interp_val))
+    
+    return pd.DataFrame(results, columns=["Data_referencia", "chave", "Volatilidade_Interpolada"])
 
 # ====================================================================
-# Exemplo de Aplicação no DataFrame de Consulta
+# Aplicação no DataFrame
 # ====================================================================
-# Suponha que o DataFrame de consulta contenha as seguintes colunas:
-#   - Ativo
-#   - Data_referencia
-#   - volatilidades: array de floats (dados medidos)
-#   - tempos: array de floats (dados medidos)
-#   - deltas: array de floats (dados medidos)
-#   - query_deltas: array de floats com os deltas de consulta
-#   - query_tempos: array de floats com os tempos de consulta
-data = [
-    (
-        "ABC",                     # Ativo
-        "2025-03-31",              # Data_referencia
-        [0.3, 0.5, 0.6, 0.1],        # volatilidades: exemplo - índice 0: (tempo=1.0, delta=0.05), 1: (tempo=2.0, delta=0.05), etc.
-        [1.0, 2.0, 1.0, 2.0],        # tempos
-        [0.05, 0.05, 0.1, 0.1],       # deltas
-        [0.075, 0.085],             # query_deltas: somente os valores a consultar
-        [1.5, 2.5]                  # query_tempos: somente os tempos a consultar
-    )
-]
-columns = ["Ativo", "Data_referencia", "volatilidades", "tempos", "deltas", "query_deltas", "query_tempos"]
-df = spark.createDataFrame(data, schema=columns)
-
-# Aplica a UDTF: o próprio retorno já virá formatado como DataFrame (sem necessidade de explode)
-final_df = df.selectExpr("multi_interp_udtf(volatilidades, tempos, deltas, query_deltas, query_tempos, Ativo, Data_referencia) as results") \
-              .select("results.*")
+final_df = df.withColumn("results", multi_interp_udf(
+    col("volatilidades"), col("tempos"), col("deltas"),
+    col("query_deltas"), col("query_tempos"), col("Ativo"), col("Data_referencia")
+)).select("results.*")
 
 final_df.show(truncate=False)
-
-
----
-
-Resumo das Otimizações Aplicadas
-
-Busca Binária:
-Em cubic_spline_interp, a busca do índice do intervalo usa o método bisect_left em vez de um loop "while", acelerando o processamento para arrays grandes.
-
-Uso de defaultdict:
-Ao construir o dicionário dos dados medidos, o uso de defaultdict reduz o overhead e melhora a legibilidade.
-
-List Comprehensions:
-Para deduplicar os eixos e construir a matriz 2D, foram utilizadas list comprehensions.
-
-Processamento dos Pontos de Consulta:
-A iteração para gerar os resultados é feita apenas sobre os valores passados em query_deltas e query_tempos, garantindo que não sejam geradas combinações extras.
-
-UDTF com pandas_udtf:
-A função UDTF retorna um DataFrame já "desdobrado" (sem necessidade de explode), o que facilita o paralelismo e minimiza a sobrecarga de criação de objetos.
-
-
-Esta versão mantém a lógica final inalterada, seguindo rigorosamente as fórmulas e regras (Equações 14 a 20 com a Equação 16 corrigida) e foi refatorada para otimização máxima em cenários com muitos dados complexos, sem prejudicar o paralelismo.
-
