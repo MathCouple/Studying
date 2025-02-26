@@ -1,4 +1,4 @@
-from pyspark.sql.functions import udf, explode, col, concat_ws
+from pyspark.sql.functions import udf, explode, col
 from pyspark.sql.types import DoubleType, StringType, ArrayType, StructType, StructField
 import pyspark.sql.functions as F
 
@@ -154,18 +154,13 @@ def bidimensional_interp(deltas, tempos, vol_matrix, delta_interp, tempo_interp)
            - x_interp = tempo_interp.
          Retorna o valor final interpolado.
     """
-    interp_por_tempo = []
-    for row in vol_matrix:
-        interp_por_tempo.append(cubic_spline_interp(deltas, row, delta_interp))
+    interp_por_tempo = [cubic_spline_interp(deltas, row, delta_interp) for row in vol_matrix]
     return cubic_spline_interp(tempos, interp_por_tempo, tempo_interp)
 
 # ====================================================================
 # UDF: multi_interp_udf
 # ====================================================================
-# Essa UDF recebe os arrays de dados medidos e de consulta, monta a superfície
-# de volatilidade e retorna um array de resultados, onde cada resultado é um 
-# struct contendo a chave (formada pela concatenação de Ativo, delta e tempo de consulta)
-# e a volatilidade interpolada para aquele par.
+# Schema do resultado: array de structs com "chave" (string) e "volatilidade_interpolada" (double)
 schema_result = ArrayType(StructType([
     StructField("chave", StringType(), False),
     StructField("volatilidade_interpolada", DoubleType(), False)
@@ -182,52 +177,51 @@ def multi_interp_udf(volatilidades, tempos, deltas, query_deltas, query_tempos, 
       - tempos: array de floats com os tempos correspondentes (podem haver repetições).
       - deltas: array de floats com os deltas correspondentes (podem haver repetições).
       - query_deltas: array de floats com os deltas para os quais deseja calcular a volatilidade interpolada.
-      - query_tempos: array de floats com os tempos (vencimentos) para os quais deseja calcular a volatilidade interpolada.
+      - query_tempos: array de floats com os tempos para os quais deseja calcular a volatilidade interpolada.
       - ativo: string com o identificador do ativo.
       - data_referencia: data (ou string) representando a data de referência.
 
     Processo:
-      1. Monta um dicionário que mapeia (tempo, delta) para a soma das volatilidades, 
+      1. Monta um dicionário que mapeia (tempo, delta) para a soma das volatilidades,
          caso haja mais de uma volatilidade para o mesmo par.
       2. Deduplica e ordena os eixos de tempo e delta.
-      3. Reconstrói a matriz 2D de volatilidade a partir do dicionário.
-      4. Para cada combinação (query_delta, query_tempo) desejada (formando um grid de consulta),
+      3. Reconstrói a matriz 2D de volatilidades a partir do dicionário.
+      4. Para cada combinação (query_delta, query_tempo) desejada (grid de consulta),
          calcula a volatilidade interpolada utilizando a função bidimensional_interp.
-      5. Para cada ponto de consulta, cria uma chave no formato "ativo_delta_tempo".
+      5. Para cada ponto de consulta, cria uma chave no formato "ativo_{delta_formatado}_{tempo_formatado}",
+         onde:
+           - O delta é multiplicado por 10 e o ponto decimal removido.
+           - O tempo (vencimento) é convertido para inteiro e preenchido com zeros à esquerda até 5 dígitos.
       6. Retorna um array de structs com a chave e a volatilidade interpolada.
     """
-    n = len(volatilidades)
+    # Monta o dicionário: mapeia (tempo, delta) para a soma das volatilidades
     data_dict = {}
-    # Monta o dicionário: para cada índice i, mapeia (tempo, delta) para a soma das volatilidades
-    for i in range(n):
+    for i in range(len(volatilidades)):
         key = (tempos[i], deltas[i])
         data_dict[key] = data_dict.get(key, 0.0) + volatilidades[i]
     
-    # Deduplica e ordena os eixos
-    unique_tempos = sorted(set(tempos))
-    unique_deltas = sorted(set(deltas))
+    # Deduplica e ordena os eixos usando list comprehensions
+    unique_tempos = sorted({t for t in tempos})
+    unique_deltas = sorted({d for d in deltas})
     
-    # Reconstrói a matriz 2D de volatilidades: para cada tempo único, cria uma linha com os valores
-    # correspondentes a cada delta único.
-    vol_matrix = []
-    for t in unique_tempos:
-        row = []
-        for d in unique_deltas:
-            row.append(data_dict.get((t, d), 0.0))
-        vol_matrix.append(row)
+    # Reconstrói a matriz 2D de volatilidades: cada linha para um tempo único,
+    # com os valores correspondentes a cada delta único.
+    vol_matrix = [[data_dict.get((t, d), 0.0) for d in unique_deltas] for t in unique_tempos]
     
-    # Para cada combinação de query_delta e query_tempo, calcula a volatilidade interpolada
-    results = []
-    for qt in query_tempos:
-        for qd in query_deltas:
-            vol_interp = bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, qd, qt)
-            chave = f"{ativo}_{qd}_{qt}"  # Chave no formato: ativo_delta_tempo
-            results.append({"chave": chave, "volatilidade_interpolada": vol_interp})
+    # Calcula os resultados para cada combinação de query_delta e query_tempo utilizando list comprehension
+    results = [
+        {
+            "chave": f"{ativo}_{str(qd * 10).replace('.', '')}_{str(int(qt)).zfill(5)}",
+            "volatilidade_interpolada": bidimensional_interp(unique_deltas, unique_tempos, vol_matrix, qd, qt)
+        }
+        for qt in query_tempos
+        for qd in query_deltas
+    ]
     return results
 
-# =============================================================================
+# ====================================================================
 # Exemplo de Aplicação no DataFrame de Consulta
-# =============================================================================
+# ====================================================================
 # Suponha que seu DataFrame de consulta contenha as seguintes colunas:
 #   - Ativo
 #   - Data_referencia
@@ -236,7 +230,6 @@ def multi_interp_udf(volatilidades, tempos, deltas, query_deltas, query_tempos, 
 #   - deltas: array de floats (dados medidos)
 #   - query_deltas: array de floats com os deltas de consulta
 #   - query_tempos: array de floats com os tempos de consulta
-
 data = [
     (
         "ABC",                     # Ativo
@@ -244,22 +237,21 @@ data = [
         [0.3, 0.5, 0.6, 0.1],        # volatilidades (ex.: índice 0 -> (tempo=1.0, delta=0.05), índice 1 -> (tempo=2.0, delta=0.05), etc.)
         [1.0, 2.0, 1.0, 2.0],        # tempos
         [0.05, 0.05, 0.1, 0.1],       # deltas
-        [0.075, 0.085],             # query_deltas (lista de deltas para consulta)
-        [1.5, 2.5]                  # query_tempos (lista de tempos para consulta)
+        [0.075, 0.085],             # query_deltas
+        [1.5, 2.5]                  # query_tempos
     )
 ]
 columns = ["Ativo", "Data_referencia", "volatilidades", "tempos", "deltas", "query_deltas", "query_tempos"]
-
 df = spark.createDataFrame(data, schema=columns)
 
-# Aplica a UDF para criar uma coluna "results" com os resultados de interpolação
+# Aplica a UDF para criar a coluna "results" com os resultados de interpolação
 df = df.withColumn("results", multi_interp_udf("volatilidades", "tempos", "deltas", "query_deltas", "query_tempos", "Ativo", "Data_referencia"))
 
 # Explode a coluna "results" para obter uma linha por cada combinação (query_delta, query_tempo)
-final_df = df.select("Data_referencia", "Ativo", explode("results").alias("result")) \
+final_df = df.select("Data_referencia", explode("results").alias("result")) \
               .select(
                   "Data_referencia",
-                  F.concat_ws("_", col("Ativo"), col("result.chave")).alias("chave"),
+                  col("result.chave").alias("chave"),
                   col("result.volatilidade_interpolada").alias("Volatilidade_Interpolada")
               )
 
